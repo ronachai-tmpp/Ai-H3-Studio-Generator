@@ -676,7 +676,7 @@ def extract_frame(
                 pattern = _fxPath(tmp) / "%05d.png"
                 _fx_run(
                     [ffmpeg, "-y", "-sseof", f"-{tail_seconds}", "-i", str(video_path),
-                     "-vsync", "0", str(pattern)],
+                     "-fps_mode", "passthrough", str(pattern)],
                     timeout,
                 )
                 frames = sorted(_fxPath(tmp).glob("*.png"))
@@ -821,7 +821,7 @@ def extract_frame(
                 pattern = _fxPath(tmp) / "%05d.png"
                 _fx_run(
                     [ffmpeg, "-y", "-sseof", f"-{tail_seconds}", "-i", str(video_path),
-                     "-vsync", "0", str(pattern)],
+                     "-fps_mode", "passthrough", str(pattern)],
                     timeout,
                 )
                 frames = sorted(_fxPath(tmp).glob("*.png"))

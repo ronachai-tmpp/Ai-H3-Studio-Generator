@@ -14,10 +14,15 @@ Description:
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from app.core.console import ensure_utf8_stdio
 
-from app.core import config
+# ต้องเรียกก่อน import ส่วนอื่นของแอป เพราะบางโมดูล print ภาษาไทยตั้งแต่ตอน import
+ensure_utf8_stdio()
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from app.core import config  # noqa: E402
 from app.mcp_server import build_mcp, mcp_asgi_app, register_mcp
 from app.routers import generations, llm, media, series, system, uploads, workflows
 from app.services.llm_service import llm_service
