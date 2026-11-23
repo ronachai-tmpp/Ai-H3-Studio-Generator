@@ -125,3 +125,32 @@ def test_detail_and_overview(service, done_series):
     assert d["progress"]["scenes_done"] == 5 and d["waiting_for"] is None
     row = service.overview()[0]
     assert (row["id"], row["episodes_done"], row["episodes_total"]) == (done_series.id, 2, 2)
+
+
+def test_set_character_accepts_its_own_ref_image(service, outputs, tmp_path):
+    s = service.create_series("x"); a = tmp_path / "a.png"; a.write_bytes(b"A")
+    c = service.set_character(s.id, "Mali", image_paths=[str(a)])
+    again = service.set_character(s.id, "Mali", image_paths=[c.reference_images[0].path])
+    assert again.reference_images[0].path == c.reference_images[0].path
+    assert (outputs / again.reference_images[0].path).read_bytes() == b"A"
+
+
+def test_set_character_swapped_own_refs_do_not_cross_overwrite(service, outputs, tmp_path):
+    s = service.create_series("x")
+    a = tmp_path / "a.png"; a.write_bytes(b"A")
+    b = tmp_path / "b.png"; b.write_bytes(b"B")
+    c = service.set_character(s.id, "Mali", image_paths=[str(a), str(b)])
+    p1, p2 = (r.path for r in c.reference_images)
+    c = service.set_character(s.id, "Mali", image_paths=[p2, p1])
+    assert (outputs / p1).read_bytes() == b"B" and (outputs / p2).read_bytes() == b"A"
+
+
+def test_cancel_failure_is_logged_not_raised(service, store, gateway, caplog):
+    s = service.create_series("x"); service.write_episode(s.id, "one", [{"prompt": "p", "mode": "text"}])
+    service.control(s.id, "start")
+    live = store.get(s.id); sc = live.episodes[0].scenes[0]; sc.job_id, sc.status = "job-3", "RUNNING"; store.save(live)
+    def boom(job_id): raise RuntimeError("comfy down")
+    gateway.cancel_job = boom
+    with caplog.at_level("WARNING"):
+        assert service.control(s.id, "cancel").status == "CANCELLED"
+    assert any("job-3" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)

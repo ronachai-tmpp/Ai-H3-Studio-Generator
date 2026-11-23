@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import shutil
+import logging
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -28,6 +28,8 @@ from app.services.series_models import (
     waiting_for,
 )
 from app.services.series_store import SeriesStore
+
+logger = logging.getLogger(__name__)
 
 _MODES = ("text", "ref", "chain")
 _SCENE_KEYS = ("prompt", "mode", "beat", "characters", "duration_seconds", "seed")
@@ -64,7 +66,7 @@ class SeriesService:
             try:
                 self.gateway.cancel_job(job_id)
             except Exception:  # noqa: BLE001 — สถานะถูกบันทึกแล้ว ยกเลิกไม่สำเร็จไม่ควรทำให้การแก้ล้ม
-                pass
+                logger.warning("ยกเลิกงาน %s ไม่สำเร็จ", job_id, exc_info=True)
 
     @staticmethod
     def _reopen(series: Series) -> None:
@@ -134,10 +136,13 @@ class SeriesService:
             character.casting_attempts = 0
 
             self._check(series)
-            for src, rel in copies:
-                dest = self.outputs_dir / rel
+            # อ่านไบต์ต้นทางทั้งหมดก่อนเขียน กันไฟล์ที่ส่งกลับมาจาก refs เดิมถูกเขียนทับก่อนถูกอ่าน
+            payloads = [(src, self.outputs_dir / rel, src.read_bytes()) for src, rel in copies]
+            for src, dest, data in payloads:
+                if src.resolve() == dest.resolve():
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src, dest)
+                dest.write_bytes(data)
             self.store.add(series)
             self.store.save(series, f"character:{name}")
             if old_casting_job:
