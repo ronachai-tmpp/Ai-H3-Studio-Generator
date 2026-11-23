@@ -39,6 +39,46 @@ _RESET_FIELDS = dict(
 )
 
 
+def cancel_jobs(gateway: StudioGateway, job_ids: list[str]) -> None:
+    for job_id in job_ids:
+        try:
+            gateway.cancel_job(job_id)
+        except Exception:  # noqa: BLE001 — สถานะถูกบันทึกแล้ว ยกเลิกไม่สำเร็จไม่ควรทำให้การแก้ล้ม
+            logger.warning("ยกเลิกงาน %s ไม่สำเร็จ", job_id, exc_info=True)
+
+
+def reset_scene(series: Series, gateway: StudioGateway, episode_number: int,
+                scene_index: int) -> list[tuple[int, int]]:
+    """ทำฉากให้กลับเป็น PENDING พร้อมฉาก chain ที่ตามมาติดกัน แล้วคืนรายการ (ตอน, ฉาก) ที่ถูกรีเซ็ต
+
+    ยกเลิกงานในคิวของฉากที่ยังรันอยู่ด้วย; ผู้เรียกต้องถือ lock และ save เอง
+    """
+    flat = [(e, s) for e in series.episodes for s in e.scenes]
+    start = next(i for i, (e, s) in enumerate(flat) if e.number == episode_number and s.index == scene_index)
+    reset: list[tuple[int, int]] = []
+    cancel: list[str] = []
+    touched: list[Episode] = []
+    for i in range(start, len(flat)):
+        ep, sc = flat[i]
+        if i > start and sc.mode != "chain":
+            break
+        if sc.job_id and sc.status in ("QUEUED", "RUNNING"):
+            cancel.append(sc.job_id)
+        sc.status = "PENDING"
+        for key, value in _RESET_FIELDS.items():
+            setattr(sc, key, value)
+        reset.append((ep.number, sc.index))
+        if ep not in touched:
+            touched.append(ep)
+    for ep in touched:
+        ep.status = "PENDING"
+        ep.final_video_path = None
+        ep.thumbnail_path = None
+        ep.duration = None
+    cancel_jobs(gateway, cancel)
+    return reset
+
+
 class SeriesService:
     def __init__(self, store: SeriesStore, gateway: StudioGateway, outputs_dir: Path,
                  allowed_image_extensions: Sequence[str], max_image_bytes: int):
@@ -62,11 +102,7 @@ class SeriesService:
         self.store.save(series, event)
 
     def _cancel(self, job_ids: list[str]) -> None:
-        for job_id in job_ids:
-            try:
-                self.gateway.cancel_job(job_id)
-            except Exception:  # noqa: BLE001 — สถานะถูกบันทึกแล้ว ยกเลิกไม่สำเร็จไม่ควรทำให้การแก้ล้ม
-                logger.warning("ยกเลิกงาน %s ไม่สำเร็จ", job_id, exc_info=True)
+        cancel_jobs(self.gateway, job_ids)
 
     @staticmethod
     def _reopen(series: Series) -> None:
@@ -205,32 +241,12 @@ class SeriesService:
                     setattr(scene, field, list(value) if field == "characters" else value)
 
             reset: list[tuple[int, int]] = []
-            cancel_jobs: list[str] = []
             if must_reset:
                 self._reopen(series)
-                flat = [(e, s) for e in series.episodes for s in e.scenes]
-                start = next(i for i, (_, s) in enumerate(flat) if s is scene)
-                touched: list[Episode] = []
-                for i in range(start, len(flat)):
-                    ep, sc = flat[i]
-                    if i > start and sc.mode != "chain":
-                        break
-                    if sc.job_id and sc.status in ("QUEUED", "RUNNING"):
-                        cancel_jobs.append(sc.job_id)
-                    sc.status = "PENDING"
-                    for key, value in _RESET_FIELDS.items():
-                        setattr(sc, key, value)
-                    reset.append((ep.number, sc.index))
-                    if ep not in touched:
-                        touched.append(ep)
-                for ep in touched:
-                    ep.status = "PENDING"
-                    ep.final_video_path = None
-                    ep.thumbnail_path = None
-                    ep.duration = None
+                self._check(series)  # ตรวจก่อนยกเลิกงาน: ค่าที่แก้ไม่ผ่าน = ไม่แตะงานในคิว
+                reset = reset_scene(series, self.gateway, episode_number, scene_index)
 
             self._commit(series, f"scene:{episode_number}.{scene_index}")
-            self._cancel(cancel_jobs)
             return reset
 
     # ---------- ควบคุม ----------

@@ -57,7 +57,7 @@ class FakeGateway:
             first_frame_name=first_frame_name, job_id=job_id,
         ))
         self.jobs[job_id] = dict(
-            status="QUEUED", progress=0, error=None, video_path=None, thumbnail_path=None,
+            status="PENDING", progress=0, error=None, video_path=None, thumbnail_path=None,
             duration=None, started_at=1000.0 + 10.0 * self._counter, finished_at=None,
         )
         return job_id

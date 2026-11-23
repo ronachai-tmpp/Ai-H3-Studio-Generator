@@ -102,3 +102,29 @@ def done_series(service, store, gateway, make_series, outputs) -> Series:
     series.story_complete = True
     store.add(series)
     return series
+
+
+@pytest.fixture
+def runner(store, gateway):
+    from app.services.series_runner import SeriesRunner
+
+    return SeriesRunner(store, gateway)
+
+
+@pytest.fixture
+def running(service, tmp_path) -> Series:
+    """ซีรีส์ที่เริ่มรันแล้ว: ตัวละคร mali 1 รูป กับ 2 ตอน (text/ref/chain และ chain/text)"""
+    image = tmp_path / "mali.jpg"
+    image.write_bytes(b"jpg")
+    series = service.create_series("Demo")
+    service.set_character(series.id, "mali", image_paths=[str(image)])
+    service.write_episode(series.id, "EP1", [
+        {"prompt": "p1", "mode": "text"},
+        {"prompt": "p2", "mode": "ref", "characters": ["mali"]},
+        {"prompt": "p3", "mode": "chain"},
+    ])
+    service.write_episode(series.id, "EP2", [
+        {"prompt": "p4", "mode": "chain"},
+        {"prompt": "p5", "mode": "text"},
+    ])
+    return service.control(series.id, "start")
