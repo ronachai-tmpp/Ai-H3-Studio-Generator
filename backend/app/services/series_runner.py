@@ -156,7 +156,9 @@ class SeriesRunner:
                 status, error = "FAILED", "งานเสร็จแล้วแต่ไม่มีไฟล์วิดีโอ (job finished without a video file)"
             else:
                 dest = f"series/{series.id}/refs/{character_stem(series, character)}_cast.jpg"
-                if self.gateway.extract_frame(video, dest, "last", 3):
+                # ffmpeg บางรุ่นดึงเฟรมย้อนหลังไม่ได้ (offset 3): ถอยไปใช้เฟรมสุดท้ายตรง ๆ
+                if (self.gateway.extract_frame(video, dest, "last", 3)
+                        or self.gateway.extract_frame(video, dest, "last", 0)):
                     self._finish_casting(series, character, dest)
                     return
                 status, error = "FAILED", "ดึงเฟรมจากวิดีโอคัดตัวละครไม่ได้ (extract frame failed)"

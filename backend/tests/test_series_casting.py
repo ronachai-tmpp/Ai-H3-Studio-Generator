@@ -95,6 +95,25 @@ def test_casting_frame_extract_failure_counts_as_failure(runner, gateway, castin
     assert ch.casting_attempts == 1 and ch.casting_job_id is None and not ch.reference_images
 
 
+def test_casting_falls_back_to_offset_zero(runner, gateway, casting, store, monkeypatch):
+    runner.tick(); gateway.finish("job-1")
+    original = gateway.extract_frame
+
+    def fail_offset_3(video, dest, position="last", offset=0):
+        if offset == 3:
+            gateway.extract_calls.append((video, dest, position, offset))
+            return False
+        return original(video, dest, position, offset)
+
+    monkeypatch.setattr(gateway, "extract_frame", fail_offset_3)
+    runner.tick()
+    s = store.get(casting.id); ch = s.characters[0]
+    ref = f"series/{casting.id}/refs/mali_cast.jpg"
+    assert gateway.extract_calls == [("videos/job-1.mp4", ref, "last", 3), ("videos/job-1.mp4", ref, "last", 0)]
+    assert ch.reference_images[0].path == ref and ch.casting_attempts == 0
+    assert (s.status, s.pause_reason) == ("PAUSED", "casting")
+
+
 def test_casting_cancelled_pauses_for_user(runner, gateway, casting, store):
     runner.tick(); gateway.finish("job-1", "CANCELLED"); runner.tick()
     s = store.get(casting.id)
