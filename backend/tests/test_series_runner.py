@@ -189,3 +189,48 @@ def test_events_are_emitted(runner, gateway, running, store):
     runner.tick(); gateway.finish("job-1"); runner.tick()
     _, events = store.wait_events(running.id, c, timeout=0.1)
     assert "EP01 scene 1 DONE" in events
+
+
+def test_failing_series_does_not_block_others(service, runner, gateway, running, store):
+    other = service.create_series("other")
+    service.write_episode(other.id, "one", [{"prompt": "q", "mode": "text"}])
+    service.control(other.id, "start")
+    original = gateway.submit_job
+
+    def flaky(**kw):
+        if kw["prompt"] == "p1":
+            raise RuntimeError("boom")
+        return original(**kw)
+
+    gateway.submit_job = flaky
+    runner.tick()
+    first = store.get(running.id)
+    assert (first.status, first.pause_reason) == ("PAUSED", "error") and "boom" in first.pause_message
+    assert [j["prompt"] for j in gateway.submitted] == ["q"]
+    assert store.get(other.id).episodes[0].scenes[0].status == "QUEUED"
+
+
+def test_done_job_without_video_counts_as_failure(runner, gateway, running, store):
+    runner.tick(); gateway.jobs["job-1"].update(status="DONE")
+    runner.tick(); runner.tick()
+    assert len(gateway.submitted) == 2 and store.get(running.id).status == "RUNNING"
+    gateway.jobs["job-2"].update(status="DONE"); runner.tick(); runner.tick()
+    s = store.get(running.id)
+    assert (s.status, s.pause_reason, s.episodes[0].scenes[0].status) == ("PAUSED", "error", "FAILED")
+    assert len(gateway.submitted) == 2
+
+
+def test_merge_result_dropped_when_regenerated_during_concat(service, runner, gateway, running, store):
+    for _ in range(3): runner.tick(); gateway.finish(f"job-{len(gateway.submitted)}"); runner.tick()
+    original = gateway.concat
+
+    def concat_then_regenerate(paths, dest):
+        service.update_scene(running.id, 1, 1, regenerate=True)
+        return original(paths, dest)
+
+    gateway.concat = concat_then_regenerate
+    c = store.cursor(running.id)
+    runner.tick()
+    ep = store.get(running.id).episodes[0]
+    _, events = store.wait_events(running.id, c, timeout=0.1)
+    assert ep.status != "DONE" and ep.final_video_path is None and "EP01 DONE" not in events

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 from collections.abc import Callable
@@ -15,6 +16,8 @@ from app.services.series_gateway import StudioGateway
 from app.services.series_models import Episode, Scene, Series, find_character, job_type_for
 from app.services.series_service import reset_scene
 from app.services.series_store import SeriesStore
+
+logger = logging.getLogger(__name__)
 
 
 class SeriesRunner:
@@ -31,7 +34,17 @@ class SeriesRunner:
         with self.store.lock:
             ids = [s.id for s in self.store.list() if s.status == "RUNNING"]
         for series_id in ids:
-            self._advance(series_id)
+            try:
+                self._advance(series_id)
+            except Exception as exc:  # noqa: BLE001 — ซีรีส์หนึ่งพังต้องไม่ลากซีรีส์อื่นหยุดตาม
+                logger.exception("Series %s: runner error", series_id)
+                self._pause_on_error(series_id, exc)
+
+    def _pause_on_error(self, series_id: str, exc: Exception) -> None:
+        with self.store.lock:
+            series = self.store.get(series_id)
+            if series.status == "RUNNING":
+                self._pause(series, "error", f"ข้อผิดพลาดภายใน: {exc}", f"series error: {exc}")
 
     # ---------- ตัวช่วย ----------
     @staticmethod
@@ -141,13 +154,17 @@ class SeriesRunner:
                 self.store.save(series, f"{label} job lost, resubmit")
                 return
 
+        if job["status"] == "DONE" and not (
+            job.get("video_path") or self.gateway.find_output_video(scene.job_id)
+        ):  # งานบอกเสร็จแต่ไม่มีไฟล์วิดีโอ: นับเหมือนล้มเหลว (กันวนใช้ GPU ไม่จบ)
+            job = dict(status="FAILED", error="งานเสร็จแล้วแต่ไม่มีไฟล์วิดีโอ (job finished without a video file)")
+
         status = job["status"]
         if status == "RUNNING":
             scene.status = "RUNNING"
             scene.progress = job.get("progress") or 0  # แค่สะท้อนในหน่วยความจำ ไม่บันทึก
         elif status == "DONE":
-            video = job.get("video_path") or self.gateway.find_output_video(scene.job_id)
-            scene.video_path = video
+            scene.video_path = job.get("video_path") or self.gateway.find_output_video(scene.job_id)
             scene.thumbnail_path = job.get("thumbnail_path")
             scene.last_frame_path = f"frames/{scene.job_id}_last.jpg"
             scene.progress = 100
