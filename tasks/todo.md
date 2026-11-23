@@ -46,6 +46,7 @@
 
 ### ยังค้าง (ไม่ได้ทำรอบนี้)
 - Bearer token สำหรับ `/mcp` โหมด LAN — รอเจ้าของตัดสิน
-- `media_processor.extract_frame` (`-vsync`) และ `print` ภาษาไทยเมื่อ stdout ไม่ใช่ UTF-8 — บั๊กในโค้ดเดิม ไม่ได้แตะ
+- ~~`media_processor.extract_frame` (`-vsync`) และ `print` ภาษาไทยเมื่อ stdout ไม่ใช่ UTF-8~~ — แก้แล้ว 2026-11-23 (`-fps_mode passthrough`, `app/core/console.py`) ยืนยันด้วยงาน gen จริงและปุ่มดึงเฟรม LAST −3
+- ~~path เครือข่าย `\\host\share` ถูกเปิดอ่านในโหมดเครื่องตัวเอง~~ — แก้แล้ว 2026-11-23 ปฏิเสธทุกโหมดก่อนแตะระบบไฟล์
 - รูปอ้างอิงตัวละครส่งให้ Claude ขนาดเต็ม, Ctrl+C อาจรอ `series_wait` นานถึง 5 นาที, ไม่มี retry ตอนเขียนไฟล์สถานะชนกับโปรแกรมอื่น
 - ซับไตเติลฝังในวิดีโอ, ผูกกับ Projects/History (ตาม spec ข้อ 8)
