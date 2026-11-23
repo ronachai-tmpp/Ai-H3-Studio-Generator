@@ -741,3 +741,92 @@ export async function enhancePrompt(
     timeoutMs
   )
 }
+/**
+ * ========================================
+ * Series API
+ * ========================================
+ * หน้าเว็บ /series ใช้ดูความคืบหน้าและสั่งหยุด/รันต่อ/ยกเลิกเท่านั้น
+ * (การสร้างเนื้อหาทำผ่าน MCP) path ในผลลัพธ์เป็น relative ใต้ outputs
+ * เปิดดูได้ด้วย getMediaUrl() / getFrameUrl()
+ */
+
+export type SeriesStatus = 'DRAFT' | 'RUNNING' | 'PAUSED' | 'DONE' | 'CANCELLED'
+export type SceneStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED'
+
+export interface SeriesProgress {
+  scenes_done: number
+  scenes_total: number
+  avg_scene_seconds: number | null
+  eta_seconds: number | null
+}
+
+export interface SeriesOverview {
+  id: string
+  title: string
+  status: SeriesStatus
+  pause_reason: string | null
+  waiting_for: string | null
+  episodes_done: number
+  episodes_total: number
+  progress: SeriesProgress
+}
+
+export interface SeriesScene {
+  index: number
+  prompt: string
+  beat: string
+  mode: 'text' | 'ref' | 'chain'
+  characters: string[]
+  duration_seconds: number
+  status: SceneStatus
+  progress: number
+  attempts: number
+  error: string | null
+  video_path: string | null
+  thumbnail_path: string | null
+  last_frame_path: string | null
+}
+
+export interface SeriesEpisode {
+  number: number
+  title: string
+  synopsis: string
+  caption: string
+  hashtags: string[]
+  status: 'PENDING' | 'RUNNING' | 'DONE'
+  scenes: SeriesScene[]
+  final_video_path: string | null
+  thumbnail_path: string | null
+  duration: number | null
+}
+
+export interface SeriesDetail
+  extends Omit<SeriesOverview, 'episodes_done' | 'episodes_total'> {
+  logline: string
+  run_mode: string
+  pause_message: string | null
+  story_complete: boolean
+  episodes: SeriesEpisode[]
+}
+
+/** route ลงทะเบียนแบบมี trailing slash จึงต้องเรียก /api/series/ */
+export async function fetchSeriesList(): Promise<SeriesOverview[]> {
+  return apiFetch<SeriesOverview[]>('/api/series/', { method: 'GET' })
+}
+
+export async function fetchSeries(id: string): Promise<SeriesDetail> {
+  return apiFetch<SeriesDetail>(`/api/series/${encodeURIComponent(id)}`, {
+    method: 'GET',
+  })
+}
+
+export async function controlSeries(
+  id: string,
+  action: 'pause' | 'resume' | 'cancel'
+): Promise<SeriesDetail> {
+  return apiFetch<SeriesDetail>(`/api/series/${encodeURIComponent(id)}/control`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  })
+}

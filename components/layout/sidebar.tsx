@@ -22,6 +22,7 @@ import {
   Images,
   LayoutDashboard,
   Settings,
+  Tv,
   X,
 } from 'lucide-react'
 
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
   { href: '/', label: 'แดชบอร์ด', icon: LayoutDashboard },
   { href: '/studio', label: 'สร้างคลิปสั้น', icon: Clapperboard },
   { href: '/shortfilm', label: 'สร้างหนังสั้น', icon: Film },
+  { href: '/series', label: 'ซีรีย์', icon: Tv },
   { href: '/projects', label: 'โปรเจค', icon: FolderOpen },
   { href: '/history', label: 'ประวัติ', icon: History },
   { href: '/media', label: 'มีเดีย', icon: ImageIcon },
