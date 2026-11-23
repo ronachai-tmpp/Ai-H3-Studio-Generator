@@ -22,6 +22,7 @@ class SeriesStore:
         self.load_errors: list[str] = []
         self._series: dict[str, Series] = {}
         self._events: dict[str, list[str]] = {}
+        self._revisions: dict[str, int] = {}
         self._changed = threading.Condition(self.lock)
 
     def load_all(self) -> None:
@@ -68,6 +69,7 @@ class SeriesStore:
             tmp = folder / (SERIES_FILE + ".tmp")
             tmp.write_text(series.model_dump_json(indent=2), encoding="utf-8")
             os.replace(tmp, folder / SERIES_FILE)
+            self._revisions[series.id] = self._revisions.get(series.id, 0) + 1
             if event is not None:
                 self._events.setdefault(series.id, []).append(event)
                 self._changed.notify_all()
@@ -76,6 +78,11 @@ class SeriesStore:
         if not series_id or series_id in (".", "..") or any(c in series_id for c in "/\\:"):
             raise SeriesError(f"รหัสซีรีส์ไม่ถูกต้อง: '{series_id}'")
         return self.root / series_id
+
+    def revision(self, series_id: str) -> int:
+        """ตัวนับที่เพิ่มทุกครั้งที่ save ซีรีส์นี้ (ใช้ตรวจว่ามีใครแก้ระหว่างที่ปล่อย lock ไป)"""
+        with self.lock:
+            return self._revisions.get(series_id, 0)
 
     def cursor(self, series_id: str) -> int:
         with self.lock:

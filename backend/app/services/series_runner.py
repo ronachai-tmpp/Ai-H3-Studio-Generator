@@ -164,7 +164,8 @@ class SeriesRunner:
                                      "งานเสร็จแล้วแต่ไม่มีไฟล์วิดีโอ (job finished without a video file)")
                 return None
             dest = f"series/{series.id}/refs/{character_stem(series, character)}_cast.jpg"
-            return functools.partial(self._extract_cast, series.id, character.name, job_id, video, dest)
+            return functools.partial(self._extract_cast, series.id, self.store.revision(series.id),
+                                     character.name, job_id, video, dest)
         if status == "FAILED":
             self._casting_failed(series, character, job.get("error"))
         elif status == "CANCELLED":
@@ -172,7 +173,8 @@ class SeriesRunner:
             self._pause(series, "user", None, f"casting {character.name} cancelled")
         return None
 
-    def _extract_cast(self, series_id: str, name: str, job_id: str, video: str, dest: str) -> None:
+    def _extract_cast(self, series_id: str, revision: int, name: str, job_id: str, video: str,
+                      dest: str) -> None:
         """นอก lock: ดึงเฟรมจากวิดีโอคัดตัวละคร แล้วกลับเข้า lock บันทึกผลถ้าตัวละครยังรอผลงานนี้อยู่"""
         # ffmpeg บางรุ่นดึงเฟรมย้อนหลังไม่ได้ (offset 3): ถอยไปใช้เฟรมสุดท้ายตรง ๆ
         ok = (self.gateway.extract_frame(video, dest, "last", 3)
@@ -180,8 +182,9 @@ class SeriesRunner:
         with self.store.lock:
             series = self.store.get(series_id)
             character = find_character(series, name)
-            if series.status != "RUNNING" or character is None or character.casting_job_id != job_id:
-                return  # ระหว่างดึงเฟรมมีคนพัก/ยกเลิก/คัดตัวใหม่: ทิ้งผลนี้
+            if (self.store.revision(series_id) != revision or series.status != "RUNNING"
+                    or character is None or character.casting_job_id != job_id):
+                return  # ระหว่างดึงเฟรมมีคนแก้ซีรีส์ (พัก/ยกเลิก/คัดตัวใหม่ ฯลฯ): ทิ้งผลนี้ รอบหน้าทำใหม่
             if ok:
                 self._finish_casting(series, character, dest)
             else:
@@ -230,7 +233,11 @@ class SeriesRunner:
         return None
 
     def _submit_key(self, series: Series, episode: Episode, scene: Scene) -> tuple:
-        """สิ่งที่การเตรียมส่งฉากขึ้นอยู่ด้วย — ถ้าเปลี่ยนระหว่างทำ I/O นอก lock ผลที่เตรียมไว้ใช้ไม่ได้"""
+        """สิ่งที่การเตรียมส่งฉากขึ้นอยู่ด้วย — ถ้าเปลี่ยนระหว่างทำ I/O นอก lock ผลที่เตรียมไว้ใช้ไม่ได้
+
+        รวม revision ของ store ด้วย: การแก้ใด ๆ ระหว่างนั้น (เช่นเปลี่ยนรูปตัวละครโดยใช้ path เดิม)
+        ทำให้ทิ้งผลที่เตรียมไว้ แล้วรอบหน้าค่อยเตรียมใหม่จากข้อมูลล่าสุด
+        """
         if scene.mode == "ref":
             inputs: tuple = tuple(i.path for i in self._scene_images(series, scene))
         elif scene.mode == "chain":
@@ -238,7 +245,7 @@ class SeriesRunner:
             inputs = (previous.job_id, previous.video_path)
         else:
             inputs = ()
-        return episode.number, scene.index, scene.mode, inputs
+        return self.store.revision(series.id), episode.number, scene.index, scene.mode, inputs
 
     def _still_next(self, series_id: str, key: tuple) -> tuple[Series, Episode, Scene] | None:
         """ใต้ lock: คืน (series, episode, scene) ตัวจริงถ้าฉากที่เตรียมไว้ยังเป็นงานถัดไปแบบเดิม ไม่งั้น None"""

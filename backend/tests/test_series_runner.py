@@ -344,3 +344,26 @@ def test_series_done_rewrites_manifest(service, runner, gateway, running, store)
     assert store.get(running.id).status == "DONE"
     manifest = json.loads((store.series_dir(running.id) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["story_complete"] is True and [e["number"] for e in manifest["episodes"]] == [1, 2]
+
+
+def test_character_replaced_during_upload_drops_the_stale_name(service, runner, gateway, running, store, tmp_path):
+    runner.tick(); gateway.finish("job-1"); runner.tick()                 # ฉากถัดไปเป็น ref ของ mali
+    new = tmp_path / "new.jpg"; new.write_bytes(b"new face")
+    original = gateway.push_image
+    replaced: list[str] = []
+
+    def push_then_replace(rel):
+        name = original(rel)
+        if not replaced:
+            replaced.append(name)
+            service.set_character(running.id, "mali", image_paths=[str(new)])
+        return name
+
+    gateway.push_image = push_then_replace
+    runner.tick()
+    s = store.get(running.id)
+    assert len(gateway.submitted) == 1 and s.episodes[0].scenes[1].job_id is None
+    assert s.characters[0].reference_images[0].comfy_name is None
+    runner.tick()
+    assert len(gateway.pushed) == 2 and gateway.submitted[1]["job_type"] == "REF2VA"
+    assert gateway.submitted[1]["reference_names"] == ["in_2.jpg"] != replaced

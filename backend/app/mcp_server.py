@@ -241,17 +241,22 @@ def build_mcp(service: SeriesService, store: SeriesStore, gateway: StudioGateway
         """Block until the next series event (scene done/failed, episode done, pause, finish) or timeout, then return the events and the status.
 
         timeout_seconds is clamped to 5-300. after_event is the event_cursor from an earlier
-        status (-1 = only events from now on). Returns at once with the status when the series
-        is not RUNNING (DRAFT, PAUSED, DONE, CANCELLED), since nothing happens until you act.
+        status (-1 = only events from now on). When the series is not RUNNING (DRAFT, PAUSED,
+        DONE, CANCELLED) it does not wait: it returns at once with any events already logged
+        after after_event plus the status, since nothing happens until you act.
         """
         # tool แบบ sync: แพ็กเกจ mcp รันใน worker thread จึงรอ lock ของ store ได้โดยไม่บล็อก event loop
         timeout = max(WAIT_MIN_SECONDS, min(WAIT_MAX_SECONDS, timeout_seconds))
         try:
             after = store.cursor(series_id) if after_event < 0 else after_event
-            if store.get(series_id).status != "RUNNING":  # ไม่มีอะไรเกิดจนกว่าจะสั่งการ: ตอบทันที
-                return "events: none (series is not RUNNING)\n" + _status_text(store, series_id)
-            _, events = store.wait_events(series_id, after, float(timeout))
-            lines = [f"events: {', '.join(events)}" if events else "events: none (timeout)"]
+            if store.get(series_id).status != "RUNNING":
+                # ไม่มีอะไรเกิดจนกว่าจะสั่งการ: ไม่รอ แต่ยังคืน event ที่เกิดหลัง cursor ไปแล้ว (เช่นเหตุที่ทำให้พัก)
+                _, events = store.wait_events(series_id, after, 0.0)
+                idle = "events: none (series is not RUNNING)"
+            else:
+                _, events = store.wait_events(series_id, after, float(timeout))
+                idle = "events: none (timeout)"
+            lines = [f"events: {', '.join(events)}" if events else idle]
             lines.append(_status_text(store, series_id))
         except SeriesError as exc:
             return f"ERROR: {exc}"

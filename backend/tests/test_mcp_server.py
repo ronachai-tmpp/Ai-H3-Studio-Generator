@@ -195,3 +195,12 @@ def test_studio_status_lists_unreadable_series_folders(mcp, store, outputs):
     store.load_all()
     text = call(mcp, "studio_status")["content"][0]["text"]
     assert "broken-1" in text
+
+
+def test_wait_on_paused_series_returns_pending_events(mcp, service, store, running):
+    cursor = store.cursor(running.id)
+    live = store.get(running.id); live.status, live.pause_reason = "PAUSED", "error"
+    store.save(live, "EP01 scene 3 FAILED")
+    t = time.monotonic()
+    text = call(mcp, "series_wait", series_id=running.id, timeout_seconds=120, after_event=cursor)["content"][0]["text"]
+    assert time.monotonic() - t < 1.0 and "EP01 scene 3 FAILED" in text and "PAUSED" in text
