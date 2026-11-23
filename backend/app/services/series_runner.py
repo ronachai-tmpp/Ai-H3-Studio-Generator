@@ -8,13 +8,18 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
 import time
+import traceback
 from collections.abc import Callable
 
 from app.services.series_export import write_manifest
 from app.services.series_gateway import StudioGateway
-from app.services.series_models import Episode, Scene, Series, find_character, job_type_for
-from app.services.series_service import reset_scene
+from app.services.series_models import (
+    CASTING_DURATION_SECONDS, Character, Episode, RefImage, Scene, Series,
+    find_character, job_type_for, needs_casting,
+)
+from app.services.series_service import character_stem, reset_scene
 from app.services.series_store import SeriesStore
 
 logger = logging.getLogger(__name__)
@@ -28,6 +33,32 @@ class SeriesRunner:
         self.tick_seconds = tick_seconds
         self.clock = clock
         self._submitted: set[str] = set()  # งานที่ runner นี้ส่งเอง (แยก "ผู้ใช้ลบงาน" ออกจาก "แอปรีสตาร์ต")
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    # ---------- thread ----------
+    def start(self) -> None:
+        """เริ่ม thread พื้นหลังที่เรียก tick() ทุก tick_seconds (เรียกซ้ำได้)"""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="h3-series-runner", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """สั่งหยุดแล้วรอจน loop จบจริง (รวมรอบ tick ที่กำลังทำอยู่)"""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception:  # noqa: BLE001 — tick พังต้องไม่ฆ่า thread
+                traceback.print_exc()
+            self._stop.wait(self.tick_seconds)
 
     def tick(self) -> None:
         """หนึ่งรอบ ครอบคลุมทุกซีรีส์ที่ RUNNING (ซีรีส์ละหนึ่งการเปลี่ยนแปลง)"""
@@ -64,6 +95,8 @@ class SeriesRunner:
             series = self.store.get(series_id)
             if series.status != "RUNNING":
                 return
+            if self._advance_casting(series):
+                return
             episode = next((e for e in series.episodes if e.status != "DONE"), None)
             if episode is None:
                 if series.story_complete:
@@ -79,6 +112,77 @@ class SeriesRunner:
                 self._poll(series, episode, scene)
         if merge is not None:
             self._merge(series_id, *merge)
+
+    # ---------- คัดตัวละคร (auto-casting) ----------
+    def _advance_casting(self, series: Series) -> bool:
+        """คืน True ถ้ามีการคัดตัวละครค้างอยู่ในซีรีส์นี้ (รอบนี้จบแค่นี้)"""
+        character = next((c for c in series.characters if c.casting_job_id), None)
+        if character is not None:
+            self._poll_casting(series, character)
+            return True
+        character = next((c for c in series.characters if needs_casting(c)), None)
+        if character is None:
+            return False
+        character.casting_job_id = self.gateway.submit_job(
+            prompt=character.casting_prompt, job_type=job_type_for("text", series.low_vram),
+            megapixels=series.megapixels, aspect_ratio=series.aspect_ratio,
+            duration_seconds=CASTING_DURATION_SECONDS, seed=-1,
+        )
+        self._submitted.add(character.casting_job_id)
+        self.store.save(series, f"casting {character.name} QUEUED")
+        return True
+
+    def _poll_casting(self, series: Series, character: Character) -> None:
+        job_id = character.casting_job_id
+        job = self.gateway.get_job(job_id)
+        if job is None:
+            video = self.gateway.find_output_video(job_id)
+            if video is not None:
+                job = dict(status="DONE", video_path=video)
+            elif job_id in self._submitted:
+                character.casting_job_id = None
+                self._pause(series, "user", None, f"casting {character.name} job removed")
+                return
+            else:  # แอปรีสตาร์ตแล้วงานหายจากคิว: ส่งใหม่ ไม่นับเป็นความพยายาม
+                character.casting_job_id = None
+                self.store.save(series, f"casting {character.name} job lost, resubmit")
+                return
+
+        status = job["status"]
+        error = job.get("error")
+        if status == "DONE":
+            video = job.get("video_path") or self.gateway.find_output_video(job_id)
+            if not video:  # งานบอกเสร็จแต่ไม่มีไฟล์วิดีโอ: นับเหมือนล้มเหลว
+                status, error = "FAILED", "งานเสร็จแล้วแต่ไม่มีไฟล์วิดีโอ (job finished without a video file)"
+            else:
+                dest = f"series/{series.id}/refs/{character_stem(series, character)}_cast.jpg"
+                if self.gateway.extract_frame(video, dest, "last", 3):
+                    self._finish_casting(series, character, dest)
+                    return
+                status, error = "FAILED", "ดึงเฟรมจากวิดีโอคัดตัวละครไม่ได้ (extract frame failed)"
+
+        if status == "FAILED":
+            character.casting_attempts += 1
+            character.casting_job_id = None
+            if character.casting_attempts < series.max_attempts:
+                self.store.save(series, f"casting {character.name} retry {character.casting_attempts}")
+            else:
+                self._pause(series, "error", f"คัดตัวละคร {character.name} ล้มเหลว: {error}",
+                            f"casting {character.name} FAILED: {error}")
+        elif status == "CANCELLED":
+            character.casting_job_id = None
+            self._pause(series, "user", None, f"casting {character.name} cancelled")
+
+    def _finish_casting(self, series: Series, character: Character, ref_path: str) -> None:
+        character.reference_images = [RefImage(path=ref_path)]
+        character.casting_job_id = None
+        event = f"character {character.name} cast"
+        if any(needs_casting(c) for c in series.characters):
+            self.store.save(series, event)
+            return
+        names = [c.name for c in series.characters
+                 if c.reference_images and c.reference_images[0].path.endswith("_cast.jpg")]
+        self._pause(series, "casting", f"คัดตัวละครเสร็จแล้ว กรุณาตรวจรูป: {', '.join(names)}", event)
 
     # ---------- ส่งงาน ----------
     def _submit(self, series: Series, episode: Episode, scene: Scene) -> None:

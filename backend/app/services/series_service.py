@@ -39,6 +39,12 @@ _RESET_FIELDS = dict(
 )
 
 
+def character_stem(series: Series, character: Character) -> str:
+    """ชื่อไฟล์ฐานของรูปตัวละคร: slug ของชื่อ หรือ char<k> (k = ลำดับ 1-based) เมื่อ slug ว่าง (เช่นชื่อไทยล้วน)"""
+    position = next(i for i, c in enumerate(series.characters, start=1) if c is character)
+    return slugify(character.name) or f"char{position}"
+
+
 def cancel_jobs(gateway: StudioGateway, job_ids: list[str]) -> None:
     for job_id in job_ids:
         try:
@@ -157,8 +163,7 @@ class SeriesService:
             if character is None:
                 character = Character(name=name)
                 series.characters.append(character)
-            position = series.characters.index(character) + 1
-            stem = slugify(name) or f"char{position}"
+            stem = character_stem(series, character)
             copies = [
                 (src, f"series/{series_id}/refs/{stem}_{n}{src.suffix.lower()}")
                 for n, src in enumerate(sources, start=1)
