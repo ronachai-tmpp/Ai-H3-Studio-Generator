@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -10,6 +11,8 @@ from pathlib import Path
 from app.services.series_models import Series, SeriesError
 
 SERIES_FILE = "series.json"
+
+logger = logging.getLogger(__name__)
 
 
 class SeriesStore:
@@ -34,7 +37,8 @@ class SeriesStore:
                     continue
                 try:
                     series = Series.model_validate_json(file.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
+                except (OSError, ValueError) as exc:
+                    logger.warning("ข้ามโฟลเดอร์ซีรีส์ที่อ่านไม่ได้ %s: %s", folder.name, exc)
                     self.load_errors.append(folder.name)
                     continue
                 self._series[series.id] = series
@@ -78,9 +82,13 @@ class SeriesStore:
             return len(self._events.get(series_id, []))
 
     def wait_events(self, series_id: str, after: int, timeout: float) -> tuple[int, list[str]]:
-        """รอจนมี event ใหม่หลังตำแหน่ง after แล้วคืน (cursor ใหม่, events); หมดเวลาคืน (after, [])"""
+        """รอจนมี event ใหม่หลังตำแหน่ง after แล้วคืน (cursor ใหม่, events); หมดเวลาคืน (after, [])
+
+        after ที่เกินความยาวบันทึก (เช่น cursor จากก่อน backend รีสตาร์ต) ถูกปรับลงเป็นตำแหน่งปัจจุบัน
+        """
         deadline = time.monotonic() + timeout
         with self._changed:
+            after = min(after, len(self._events.get(series_id, [])))
             while True:
                 events = self._events.get(series_id, [])
                 if len(events) > after:

@@ -18,7 +18,7 @@ from app.services.series_export import write_manifest
 from app.services.series_gateway import StudioGateway
 from app.services.series_models import (
     CASTING_DURATION_SECONDS, Character, Episode, RefImage, Scene, Series,
-    find_character, job_type_for, needs_casting,
+    clip_error, find_character, job_type_for, needs_casting,
 )
 from app.services.series_service import character_stem, reset_scene
 from app.services.series_store import SeriesStore
@@ -86,8 +86,8 @@ class SeriesRunner:
     def _pause(self, series: Series, reason: str, message: str | None, event: str) -> None:
         series.status = "PAUSED"
         series.pause_reason = reason
-        series.pause_message = message
-        self.store.save(series, event)
+        series.pause_message = clip_error(message)
+        self.store.save(series, clip_error(event))
 
     # ---------- หนึ่งซีรีส์ ----------
     def _advance(self, series_id: str) -> None:
@@ -111,6 +111,7 @@ class SeriesRunner:
             elif episode is None:
                 if series.story_complete:
                     series.status = "DONE"
+                    write_manifest(self.store, series)
                     self.store.save(series, "series DONE")
             elif scene is None:
                 work = self._prepare_merge(series, episode)
@@ -350,12 +351,13 @@ class SeriesRunner:
             scene.thumbnail_path = job.get("thumbnail_path")
             scene.last_frame_path = f"frames/{scene.job_id}_last.jpg"
             scene.progress = 100
+            scene.error = None  # ความพยายามก่อนหน้าที่ล้มเหลวไม่เกี่ยวแล้ว
             scene.finished_at = self.clock()
             scene.status = "DONE"
             self.store.save(series, f"{label} DONE")
         elif status == "FAILED":
             scene.attempts += 1
-            scene.error = job.get("error")
+            scene.error = clip_error(job.get("error"))
             scene.progress = 0
             scene.job_id = None
             if scene.attempts < series.max_attempts:
@@ -376,6 +378,7 @@ class SeriesRunner:
         for scene in episode.scenes:
             if not scene.video_path or not self.gateway.output_exists(scene.video_path):
                 reset_scene(series, self.gateway, episode.number, scene.index)
+                write_manifest(self.store, series)
                 self.store.save(series, f"{self._label(episode, scene)} file missing, regenerate")
                 return None
         if len(episode.scenes) == 1:

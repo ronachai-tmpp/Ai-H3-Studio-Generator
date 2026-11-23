@@ -82,3 +82,11 @@ def test_progress_of(make_series):
     b.started_at, b.finished_at = 100.0, 300.0
     assert progress_of(s) == {"scenes_done": 2, "scenes_total": 5,
                               "avg_scene_seconds": 150.0, "eta_seconds": 450.0}
+
+
+def test_progress_of_has_no_eta_when_nothing_remains(make_series):
+    s = make_series()
+    for e in s.episodes:
+        for sc in e.scenes:
+            sc.status, sc.started_at, sc.finished_at = "DONE", 0.0, 60.0
+    assert progress_of(s)["eta_seconds"] is None

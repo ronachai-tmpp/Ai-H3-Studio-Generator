@@ -112,6 +112,12 @@ function formatEta(seconds: number): string {
   return m === 0 ? `${h} ชั่วโมง` : `${h} ชั่วโมง ${m} นาที`
 }
 
+/** แสดงเวลาที่เหลือเฉพาะซีรีย์ที่กำลังรันและยังมีฉากค้าง */
+function etaSuffix(eta: number | null, status: SeriesStatus): string {
+  if (status !== 'RUNNING' || eta === null || !(eta > 0)) return ''
+  return ` · เหลือประมาณ ${formatEta(eta)}`
+}
+
 function errorText(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
 }
@@ -173,7 +179,7 @@ function SeriesRow({
       <p className="mt-1 text-xs text-muted-foreground">
         ตอน {series.episodes_done}/{series.episodes_total} · ฉาก {progress.scenes_done}/
         {progress.scenes_total}
-        {progress.eta_seconds !== null && ` · เหลือประมาณ ${formatEta(progress.eta_seconds)}`}
+        {etaSuffix(progress.eta_seconds, series.status)}
       </p>
       {note && <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{note}</p>}
     </button>
@@ -438,7 +444,7 @@ function SeriesDetailPanel({
           <Progress value={pct} />
           <p className="text-xs text-muted-foreground">
             ฉาก {progress.scenes_done}/{progress.scenes_total}
-            {progress.eta_seconds !== null && ` · เหลือประมาณ ${formatEta(progress.eta_seconds)}`}
+            {etaSuffix(progress.eta_seconds, detail.status)}
           </p>
         </div>
       </div>

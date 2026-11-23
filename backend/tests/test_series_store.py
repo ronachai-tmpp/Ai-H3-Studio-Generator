@@ -49,3 +49,18 @@ def test_save_without_event_does_not_wake_waiters(store, make_series):
     s = make_series(); store.add(s); c = store.cursor(s.id)
     store.save(s)
     assert store.cursor(s.id) == c
+
+
+def test_wait_events_clamps_cursor_past_the_log(store, make_series):
+    s = make_series(); store.add(s)
+    c = store.cursor(s.id)
+    import threading
+    threading.Timer(0.1, lambda: store.save(s, "EP01 scene 1 DONE")).start()
+    assert store.wait_events(s.id, c + 100, timeout=2.0) == (c + 1, ["EP01 scene 1 DONE"])
+
+
+def test_corrupt_folder_is_logged(store, outputs, caplog):
+    bad = outputs / "series" / "broken-1"; bad.mkdir(); (bad / "series.json").write_text("{not json")
+    with caplog.at_level("WARNING"):
+        store.load_all()
+    assert any("broken-1" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)

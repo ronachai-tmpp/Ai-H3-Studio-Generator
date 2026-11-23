@@ -181,3 +181,17 @@ def test_wait_does_not_block_other_requests_while_store_lock_is_held(mcp, store,
     waiter.join(10)
     assert elapsed < 1.0
     assert result and "EP01 scene 1 DONE" in result[0]
+
+
+def test_wait_returns_at_once_when_series_is_not_running(mcp, service, running):
+    service.control(running.id, "pause")
+    t = time.monotonic()
+    text = call(mcp, "series_wait", series_id=running.id, timeout_seconds=120)["content"][0]["text"]
+    assert time.monotonic() - t < 1.0 and "PAUSED" in text
+
+
+def test_studio_status_lists_unreadable_series_folders(mcp, store, outputs):
+    bad = outputs / "series" / "broken-1"; bad.mkdir(); (bad / "series.json").write_text("{not json")
+    store.load_all()
+    text = call(mcp, "studio_status")["content"][0]["text"]
+    assert "broken-1" in text

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from app.services.series_export import write_manifest
 from app.services.series_gateway import StudioGateway
 from app.services.series_models import (
     DEFAULT_ASPECT_RATIO,
@@ -23,6 +25,7 @@ from app.services.series_models import (
     find_character,
     new_series_id,
     progress_of,
+    scene_label,
     slugify,
     validate_series,
     waiting_for,
@@ -49,7 +52,7 @@ def cancel_jobs(gateway: StudioGateway, job_ids: list[str]) -> None:
     for job_id in job_ids:
         try:
             gateway.cancel_job(job_id)
-        except Exception:  # noqa: BLE001 — สถานะถูกบันทึกแล้ว ยกเลิกไม่สำเร็จไม่ควรทำให้การแก้ล้ม
+        except Exception:  # noqa: BLE001 — ยกเลิกงานในคิวไม่สำเร็จไม่ควรทำให้การแก้ซีรีส์ล้ม
             logger.warning("ยกเลิกงาน %s ไม่สำเร็จ", job_id, exc_info=True)
 
 
@@ -113,10 +116,15 @@ class SeriesService:
         cancel_jobs(self.gateway, job_ids)
 
     @staticmethod
-    def _reopen(series: Series) -> None:
-        """กติกาสถานะซีรีส์เมื่อมีฉาก/ตอนที่ต้องทำใหม่"""
+    def _ensure_editable(series: Series) -> None:
+        """ซีรีส์ที่ถูกยกเลิกแล้วแก้อะไรไม่ได้อีก (spec 5.5)"""
         if series.status == "CANCELLED":
             raise SeriesError("ซีรีส์ถูกยกเลิกแล้ว แก้ไขไม่ได้")
+
+    @classmethod
+    def _reopen(cls, series: Series) -> None:
+        """กติกาสถานะซีรีส์เมื่อมีฉาก/ตอนที่ต้องทำใหม่"""
+        cls._ensure_editable(series)
         if series.status == "DONE":
             series.status = "RUNNING"
 
@@ -127,7 +135,10 @@ class SeriesService:
             path = self.outputs_dir / path
         if relative or not self.allow_external_images:
             # path แบบ relative ห้ามหลุดออกนอก outputs/ ด้วย ".." และโหมด LAN ห้ามอ่านไฟล์นอก outputs/ เลย
-            if not path.resolve().is_relative_to(self.outputs_dir.resolve()):
+            # ชั้นแรกตรวจแบบตัวอักษรล้วน (os.path.abspath ไม่แตะระบบไฟล์) ก่อน resolve/exists/stat
+            # กัน path แบบ UNC (\\host\share\...) ทำให้ Windows เปิดการเชื่อมต่อ SMB ไปเครื่องอื่น
+            lexical = Path(os.path.abspath(path)).is_relative_to(os.path.abspath(self.outputs_dir))
+            if not lexical or not path.resolve().is_relative_to(self.outputs_dir.resolve()):
                 if relative:
                     raise SeriesError(f"path รูปต้องอยู่ใต้ outputs/ (ห้ามใช้ ..): {raw}")
                 raise SeriesError(f"โหมด LAN (mcp_allow_lan) ใช้ได้เฉพาะรูปที่อยู่ใต้ outputs/ เท่านั้น: {raw}")
@@ -141,6 +152,14 @@ class SeriesService:
             raise SeriesError(f"ไฟล์รูปใหญ่เกินกำหนด ({self.max_image_bytes} ไบต์): {raw}")
         return path
 
+    def _unused_id(self, title: str) -> str:
+        """สุ่มรหัสใหม่จนกว่าจะไม่ซ้ำทั้งใน store และโฟลเดอร์บนดิสก์ (ชื่อไทยล้วนใช้ prefix "series-" ร่วมกัน)"""
+        while True:
+            candidate = new_series_id(title)
+            if candidate not in {s.id for s in self.store.list()} \
+                    and not self.store.series_dir(candidate).exists():
+                return candidate
+
     # ---------- สร้างซีรีส์ ----------
     def create_series(self, title: str, logline: str = "", style_notes: str = "",
                       aspect_ratio: str = DEFAULT_ASPECT_RATIO, megapixels: float = DEFAULT_MEGAPIXELS,
@@ -152,7 +171,7 @@ class SeriesService:
         with self.store.lock:
             now = time.time()
             series = Series(
-                id=new_series_id(title), title=title, logline=logline, style_notes=style_notes,
+                id=self._unused_id(title), title=title, logline=logline, style_notes=style_notes,
                 aspect_ratio=aspect_ratio, megapixels=megapixels, low_vram=low_vram,
                 run_mode=run_mode, max_attempts=DEFAULT_MAX_ATTEMPTS, created_at=now, updated_at=now,
             )
@@ -166,6 +185,7 @@ class SeriesService:
             raise SeriesError("ต้องระบุชื่อตัวละคร")
         with self.store.lock:
             series = self.store.get(series_id).model_copy(deep=True)
+            self._ensure_editable(series)
             sources = [self._resolve_image(p) for p in (image_paths or [])]
 
             character = find_character(series, name)
@@ -203,24 +223,21 @@ class SeriesService:
     def write_episode(self, series_id: str, title: str, scenes: list[dict], synopsis: str = "",
                       caption: str = "", hashtags: list[str] | None = None,
                       episode_number: int | None = None) -> Episode:
-        for i, d in enumerate(scenes, start=1):
-            unknown = sorted(set(d) - set(_SCENE_KEYS) - {"index"})
-            if unknown:
-                raise SeriesError(
-                    f"ฉากที่ {i} มี key ที่ไม่รู้จัก: {unknown} (ใช้ได้: {list(_SCENE_KEYS)})"
-                )
         with self.store.lock:
             series = self.store.get(series_id).model_copy(deep=True)
-            try:
-                built = [
-                    Scene(index=i, **{k: v for k, v in d.items() if k in _SCENE_KEYS})
-                    for i, d in enumerate(scenes, start=1)
-                ]
-            except ValidationError as exc:
-                first = exc.errors()[0]
-                raise SeriesError(f"ข้อมูลฉากไม่ถูกต้อง: {first['loc']} {first['msg']}") from exc
-
             number = episode_number if episode_number is not None else len(series.episodes) + 1
+            built: list[Scene] = []
+            for i, d in enumerate(scenes, start=1):
+                where = scene_label(number, i)
+                unknown = sorted(set(d) - set(_SCENE_KEYS) - {"index"})
+                if unknown:
+                    raise SeriesError(f"{where}: มี key ที่ไม่รู้จัก: {unknown} (ใช้ได้: {list(_SCENE_KEYS)})")
+                try:
+                    built.append(Scene(index=i, **{k: v for k, v in d.items() if k in _SCENE_KEYS}))
+                except ValidationError as exc:
+                    first = exc.errors()[0]
+                    raise SeriesError(f"{where}: ข้อมูลฉากไม่ถูกต้อง: {first['loc']} {first['msg']}") from exc
+
             episode = Episode(
                 number=number, title=title, synopsis=synopsis, caption=caption,
                 hashtags=list(hashtags or []), scenes=built,
@@ -244,6 +261,7 @@ class SeriesService:
                      seed: int | None = None, regenerate: bool = False) -> list[tuple[int, int]]:
         with self.store.lock:
             series = self.store.get(series_id).model_copy(deep=True)
+            self._ensure_editable(series)
             episode = next((e for e in series.episodes if e.number == episode_number), None)
             if episode is None:
                 raise SeriesError(f"ไม่พบตอนที่ {episode_number}")
@@ -251,7 +269,9 @@ class SeriesService:
             if scene is None:
                 raise SeriesError(f"ไม่พบฉากที่ {scene_index} ในตอนที่ {episode_number}")
             if mode is not None and mode not in _MODES:
-                raise SeriesError(f"mode '{mode}' ไม่รองรับ (ใช้ได้: {list(_MODES)})")
+                raise SeriesError(
+                    f"{scene_label(episode_number, scene_index)}: mode '{mode}' ไม่รองรับ (ใช้ได้: {list(_MODES)})"
+                )
 
             must_reset = regenerate or scene.status in ("QUEUED", "RUNNING")
             edits = dict(prompt=prompt, beat=beat, mode=mode, characters=characters,
@@ -267,6 +287,8 @@ class SeriesService:
                 reset = reset_scene(series, self.gateway, episode_number, scene_index)
 
             self._commit(series, f"scene:{episode_number}.{scene_index}")
+            if reset:  # ตอนที่ถูกรีเซ็ตหายจาก manifest จนกว่าจะรวมใหม่
+                write_manifest(self.store, series)
             return reset
 
     # ---------- ควบคุม ----------
@@ -275,7 +297,7 @@ class SeriesService:
             series = self.store.get(series_id).model_copy(deep=True)
             if series.status == "CANCELLED":
                 raise SeriesError("ซีรีส์ถูกยกเลิกแล้ว สั่งการไม่ได้")
-            cancel_jobs: list[str] = []
+            to_cancel: list[str] = []
 
             if action == "start":
                 if series.status != "DRAFT":
@@ -307,10 +329,17 @@ class SeriesService:
             elif action == "finish":
                 series.story_complete = True
             elif action == "cancel":
-                cancel_jobs = [
-                    s.job_id for e in series.episodes for s in e.scenes
-                    if s.job_id and s.status in ("QUEUED", "RUNNING")
-                ] + [c.casting_job_id for c in series.characters if c.casting_job_id]
+                for episode in series.episodes:
+                    for scene in episode.scenes:
+                        if scene.status in ("QUEUED", "RUNNING"):
+                            if scene.job_id:
+                                to_cancel.append(scene.job_id)
+                            # งานในคิวกำลังถูกยกเลิก: ฉากกลับเป็น PENDING ไม่ค้างแสดงความคืบหน้า
+                            scene.status, scene.progress, scene.job_id = "PENDING", 0, None
+                for character in series.characters:
+                    if character.casting_job_id:
+                        to_cancel.append(character.casting_job_id)
+                        character.casting_job_id = None
                 series.status = "CANCELLED"
             else:
                 raise SeriesError(
@@ -318,7 +347,9 @@ class SeriesService:
                 )
 
             self._commit(series, f"control:{action}")
-            self._cancel(cancel_jobs)
+            if action == "finish":
+                write_manifest(self.store, series)
+            self._cancel(to_cancel)
             return series
 
     # ---------- อ่าน ----------

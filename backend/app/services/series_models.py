@@ -19,6 +19,7 @@ DEFAULT_MAX_ATTEMPTS = 2
 MAX_SCENES_PER_EPISODE = 20
 MAX_REF_IMAGES_PER_SCENE = 9
 CASTING_DURATION_SECONDS = 5
+MAX_ERROR_CHARS = 300
 
 
 class SeriesError(ValueError):
@@ -108,6 +109,18 @@ def new_series_id(title: str) -> str:
     return f"{slug}-{secrets.token_hex(3)}"
 
 
+def clip_error(text: str | None) -> str | None:
+    """ตัดข้อความผิดพลาดที่เก็บลงซีรีส์ให้ไม่เกิน MAX_ERROR_CHARS ตัวอักษร (เติม "…" เมื่อถูกตัด)"""
+    if text is None or len(text) <= MAX_ERROR_CHARS:
+        return text
+    return text[:MAX_ERROR_CHARS] + "…"
+
+
+def scene_label(episode_number: int, scene_position: int) -> str:
+    """ชื่อเรียกฉากในข้อความผิดพลาด เช่น "ตอนที่ 2 ฉากที่ 3" """
+    return f"ตอนที่ {episode_number} ฉากที่ {scene_position}"
+
+
 def job_type_for(mode: str, low_vram: bool) -> str:
     """ชนิดงานในคิวของแต่ละ mode (T2V / REF2VA / FL2VA, เติม _LOW เมื่อ low_vram)"""
     job_type = _JOB_TYPES[mode]
@@ -151,7 +164,7 @@ def validate_series(series: Series) -> list[str]:
             errors.append(f"{label}: ต้องมี 1-{MAX_SCENES_PER_EPISODE} ฉาก (มี {count})")
 
         for position, scene in enumerate(episode.scenes, start=1):
-            where = f"{label} ฉากที่ {position}"
+            where = scene_label(episode.number, position)
             if not scene.prompt.strip():
                 errors.append(f"{where}: prompt ว่าง")
             if scene.duration_seconds not in ALLOWED_DURATIONS:
@@ -215,5 +228,5 @@ def progress_of(series: Series) -> dict:
         "scenes_done": len(done),
         "scenes_total": len(scenes),
         "avg_scene_seconds": avg,
-        "eta_seconds": avg * remaining if avg is not None else None,
+        "eta_seconds": avg * remaining if avg is not None and remaining > 0 else None,
     }

@@ -313,3 +313,34 @@ def test_push_error_pauses_series(runner, gateway, running, store):
     runner.tick()
     s = store.get(running.id)
     assert (s.status, s.pause_reason) == ("PAUSED", "error") and "upload timeout" in s.pause_message
+
+
+def test_retry_success_clears_scene_error(runner, gateway, running, store):
+    runner.tick(); gateway.finish("job-1", "FAILED", "CUDA out of memory"); runner.tick()
+    assert store.get(running.id).episodes[0].scenes[0].error == "CUDA out of memory"
+    runner.tick(); gateway.finish("job-2"); runner.tick()
+    sc = store.get(running.id).episodes[0].scenes[0]
+    assert sc.status == "DONE" and sc.error is None
+
+
+def test_long_job_error_is_truncated_everywhere(runner, gateway, running, store):
+    c = store.cursor(running.id)
+    huge = "x" * 5000
+    runner.tick(); gateway.finish("job-1", "FAILED", huge); runner.tick(); runner.tick()
+    gateway.finish("job-2", "FAILED", huge); runner.tick()
+    s = store.get(running.id)
+    _, events = store.wait_events(running.id, c, timeout=0.1)
+    assert s.status == "PAUSED"
+    assert len(s.episodes[0].scenes[0].error) <= 320 and s.episodes[0].scenes[0].error.endswith("…")
+    assert len(s.pause_message) <= 320
+    assert events and all(len(e) <= 320 for e in events)
+
+
+def test_series_done_rewrites_manifest(service, runner, gateway, running, store):
+    import json
+    drive(runner, gateway)
+    live = store.get(running.id); live.story_complete = True; store.save(live)   # ข้าม service: ทดสอบฝั่ง runner
+    runner.tick()
+    assert store.get(running.id).status == "DONE"
+    manifest = json.loads((store.series_dir(running.id) / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["story_complete"] is True and [e["number"] for e in manifest["episodes"]] == [1, 2]

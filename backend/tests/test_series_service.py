@@ -190,3 +190,99 @@ def test_write_episode_ignores_index_key(service):
     s = service.create_series("x")
     ep = service.write_episode(s.id, "e", [{"index": 7, "prompt": "p", "mode": "text"}])
     assert ep.scenes[0].index == 1
+
+
+def test_cancel_resets_in_flight_scenes_and_casting(service, store, gateway):
+    s = service.create_series("x")
+    service.set_character(s.id, "Mali", casting_prompt="a face")
+    service.write_episode(s.id, "one", [{"prompt": "p", "mode": "text"}, {"prompt": "q", "mode": "text"}])
+    service.control(s.id, "start")
+    live = store.get(s.id)
+    sc = live.episodes[0].scenes[0]; sc.job_id, sc.status, sc.progress = "job-3", "RUNNING", 43
+    live.characters[0].casting_job_id = "job-4"; store.save(live)
+    service.control(s.id, "cancel")
+    s2 = store.get(s.id); sc = s2.episodes[0].scenes[0]
+    assert (s2.status, sc.status, sc.progress, sc.job_id) == ("CANCELLED", "PENDING", 0, None)
+    assert s2.characters[0].casting_job_id is None and sorted(gateway.cancelled) == ["job-3", "job-4"]
+
+
+def test_cancelled_series_rejects_plain_scene_edit(service, store):
+    s = service.create_series("x"); service.write_episode(s.id, "one", [{"prompt": "p", "mode": "text"}])
+    service.control(s.id, "cancel")
+    with pytest.raises(SeriesError, match="ยกเลิก"):
+        service.update_scene(s.id, 1, 1, prompt="new")
+    assert store.get(s.id).episodes[0].scenes[0].prompt == "p"
+
+
+def test_cancelled_series_rejects_character_edit(service, store, tmp_path):
+    s = service.create_series("x"); service.control(s.id, "cancel")
+    with pytest.raises(SeriesError, match="ยกเลิก"):
+        service.set_character(s.id, "Mali", casting_prompt="a face")
+    assert store.get(s.id).characters == []
+
+
+def test_lan_mode_rejects_unc_path_without_touching_it(store, gateway, outputs, monkeypatch):
+    from pathlib import Path
+    svc = _service(store, gateway, outputs, False)
+    s = svc.create_series("x")
+    unc = "\\\\host\\share\\x.jpg"
+    assert Path(unc).is_absolute()
+
+    def guard(name):
+        original = getattr(Path, name)
+
+        def checked(self, *a, **k):
+            assert "host" not in str(self), f"Path.{name} touched {self}"
+            return original(self, *a, **k)
+        monkeypatch.setattr(Path, name, checked)
+
+    for name in ("resolve", "exists", "is_file", "stat"):
+        guard(name)
+    with pytest.raises(SeriesError, match="outputs/"):
+        svc.set_character(s.id, "Mali", image_paths=[unc])
+
+
+def test_scene_errors_name_episode_and_scene(service):
+    s = service.create_series("x")
+    service.write_episode(s.id, "one", [{"prompt": "p", "mode": "text"}])
+    with pytest.raises(SeriesError, match="ตอนที่ 2 ฉากที่ 2"):
+        service.write_episode(s.id, "two", [{"prompt": "p", "mode": "text"},
+                                            {"prompt": "q", "mode": "text", "duration_seconds": "long"}])
+    with pytest.raises(SeriesError, match="ตอนที่ 2 ฉากที่ 1"):
+        service.write_episode(s.id, "two", [{"prompt": "p", "mode": "text", "length": 8}])
+    with pytest.raises(SeriesError, match="ตอนที่ 1 ฉากที่ 1"):
+        service.update_scene(s.id, 1, 1, mode="video")
+
+
+def test_create_series_skips_a_taken_id(service, store, monkeypatch):
+    from app.services import series_service as mod
+    taken = service.create_series("x").id
+    ids = iter([taken, "fresh-000001"])
+    monkeypatch.setattr(mod, "new_series_id", lambda title: next(ids))
+    assert service.create_series("y").id == "fresh-000001"
+    assert store.get(taken).title == "x"
+
+
+def test_create_series_skips_an_existing_folder(service, store, monkeypatch):
+    from app.services import series_service as mod
+    store.series_dir("orphan-000001").mkdir(parents=True)
+    ids = iter(["orphan-000001", "fresh-000002"])
+    monkeypatch.setattr(mod, "new_series_id", lambda title: next(ids))
+    assert service.create_series("y").id == "fresh-000002"
+
+
+def _manifest(store, series_id):
+    import json
+    return json.loads((store.series_dir(series_id) / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_finish_rewrites_manifest(service, store, done_series):
+    live = store.get(done_series.id); live.story_complete = False; store.save(live)
+    service.control(done_series.id, "finish")
+    m = _manifest(store, done_series.id)
+    assert m["story_complete"] is True and [e["number"] for e in m["episodes"]] == [1, 2]
+
+
+def test_regenerate_drops_episode_from_manifest(service, store, done_series):
+    service.update_scene(done_series.id, 2, 2, regenerate=True)
+    assert [e["number"] for e in _manifest(store, done_series.id)["episodes"]] == [1]
