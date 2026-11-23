@@ -18,9 +18,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import config
-from app.routers import generations, llm, media, system, uploads, workflows
+from app.routers import generations, llm, media, series, system, uploads, workflows
 from app.services.llm_service import llm_service
 from app.services.queue_service import queue_service
+from app.services.series_runtime import series_runner, series_store
 
 
 @asynccontextmanager
@@ -42,7 +43,9 @@ async def lifespan(app: FastAPI):
     (config.OUTPUTS_DIR / "videos").mkdir(parents=True, exist_ok=True)
     (config.OUTPUTS_DIR / "thumbnails").mkdir(parents=True, exist_ok=True)
 
+    series_store.load_all()
     queue_service.start_worker()
+    series_runner.start()
 
     watchdog_task = None
     if hasattr(llm_service, "idle_watchdog"):
@@ -65,6 +68,8 @@ async def lifespan(app: FastAPI):
                 # ขณะ shutdown ไม่ควรให้ error มาบล็อกการปิด app
                 pass
 
+        # ต้องหยุด runner ก่อนคิว: คิวมาร์กงานที่รันอยู่เป็น CANCELLED ตอนหยุด runner ต้องไม่เห็นสถานะนั้น
+        series_runner.stop()
         queue_service.stop_worker()
 
 
@@ -97,6 +102,7 @@ app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
 app.include_router(uploads.router, prefix="/api/uploads", tags=["uploads"])
 app.include_router(workflows.router, prefix="/api/workflows", tags=["workflows"])
 app.include_router(media.router, prefix="/api/media", tags=["media"])
+app.include_router(series.router, prefix="/api/series", tags=["series"])
 
 
 @app.get("/", summary="หน้ารากของ backend")

@@ -50,5 +50,6 @@
   "comfyui_mode": "local",
   "runpod_pod_id": "",
   "comfyui_auth_token": "",
-  "ffmpeg_path": "C:\\Program Files\\ffmpeg"
+  "ffmpeg_path": "C:\\Program Files\\ffmpeg",
+  "mcp_allow_lan": false
 }

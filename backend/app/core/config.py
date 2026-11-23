@@ -598,6 +598,14 @@ COMFYUI_IS_REMOTE = compute_is_remote(COMFYUI_MODE, COMFYUI_API_BASE_URL)
 # FFmpeg configuration (สำหรับดึงเฟรม / ต่อวิดีโอ)
 # ========================================
 
+# อนุญาตให้เครื่องอื่นใน LAN เรียก /mcp ได้ (ค่าเริ่มต้น: เฉพาะ loopback) — รับ bool หรือสตริง "true"/"false"
+_raw_mcp_allow_lan = _get("mcp_allow_lan", False)
+MCP_ALLOW_LAN = (
+    _raw_mcp_allow_lan
+    if isinstance(_raw_mcp_allow_lan, bool)
+    else str(_raw_mcp_allow_lan).strip().lower() in ("1", "true", "yes", "on")
+)
+
 FFMPEG_PATH = str(_get("ffmpeg_path", "")).strip()
 FFMPEG_TIMEOUT_SECONDS = _float_value("ffmpeg_timeout_seconds", 60.0)
 FRAMES_OUTPUT_DIR = _path_value("frames_output_dir", str(OUTPUTS_DIR / "frames"))
