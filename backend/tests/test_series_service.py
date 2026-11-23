@@ -242,6 +242,34 @@ def test_lan_mode_rejects_unc_path_without_touching_it(store, gateway, outputs, 
         svc.set_character(s.id, "Mali", image_paths=[unc])
 
 
+@pytest.mark.parametrize("raw", [
+    "\\\\host\\share\\x.jpg",        # UNC
+    "//host/share/x.jpg",            # UNC เขียนด้วย /
+    "\\\\?\\C:\\pics\\x.jpg",        # extended-length prefix
+    "\\\\.\\pipe\\x.jpg",            # device namespace
+])
+def test_network_and_device_paths_rejected_in_every_mode(service, store, monkeypatch, raw):
+    """โหมดเครื่องตัวเอง (รับรูปนอก outputs/ ได้) ก็ต้องไม่แตะ path เครือข่าย/อุปกรณ์เลย"""
+    from pathlib import Path
+    s = service.create_series("x")
+
+    def guard(name):
+        original = getattr(Path, name)
+
+        def checked(self, *a, **k):
+            text = str(self)
+            assert "host" not in text and "pipe" not in text and "pics" not in text, \
+                f"Path.{name} touched {self}"
+            return original(self, *a, **k)
+        monkeypatch.setattr(Path, name, checked)
+
+    for name in ("resolve", "exists", "is_file", "stat"):
+        guard(name)
+    with pytest.raises(SeriesError):
+        service.set_character(s.id, "Mali", image_paths=[raw])
+    assert store.get(s.id).characters == []
+
+
 def test_scene_errors_name_episode_and_scene(service):
     s = service.create_series("x")
     service.write_episode(s.id, "one", [{"prompt": "p", "mode": "text"}])

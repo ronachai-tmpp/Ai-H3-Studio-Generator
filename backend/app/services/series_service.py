@@ -129,6 +129,13 @@ class SeriesService:
             series.status = "RUNNING"
 
     def _resolve_image(self, raw: str) -> Path:
+        # path เครือข่าย/อุปกรณ์ (\\host\share, \\?\, \\.\) ปฏิเสธทุกโหมดก่อนแตะระบบไฟล์:
+        # แค่ is_file() ก็ทำให้ Windows เปิดการเชื่อมต่อ SMB ออกไปเครื่องอื่นแล้ว
+        if raw.strip().replace("/", "\\").startswith("\\\\"):
+            raise SeriesError(
+                f"ไม่รองรับ path แบบเครือข่ายหรืออุปกรณ์ (ขึ้นต้นด้วย \\\\) "
+                f"— คัดลอกรูปมาไว้ในเครื่องหรือใต้ outputs/ ก่อน: {raw}"
+            )
         path = Path(raw)
         relative = not path.is_absolute()
         if relative:
