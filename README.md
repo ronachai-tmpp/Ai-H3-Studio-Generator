@@ -167,6 +167,7 @@ install.bat
 
 > ใช้ `\\` (backslash คู่) ใน JSON เสมอ
 > คีย์อื่น ๆ ดูได้จาก `backend\config.example.json`
+> `mcp_allow_lan` (ค่าเริ่มต้น `false`) — ตั้งเป็น `true` เพื่อให้เครื่องอื่นใน LAN เรียก MCP (`/mcp`) ได้ ดู [สร้างซีรีย์ด้วย Claude Code](#-สร้างซีรีย์ด้วย-claude-code-mcp)
 
 ### ขั้นที่ 7 — เปิด Firewall (ครั้งแรกเท่านั้น)
 
@@ -309,6 +310,34 @@ start.bat
 - ส่งทีละฉาก (ใครกดก่อนได้คิวก่อน) หรือ **ส่งทั้งหมดเรียง 1→4**
 - ปุ่ม **รวมคลิปที่เสร็จแล้ว** เป็นไฟล์เดียว
 - ปุ่มล้างทั้งหมดเพื่อเริ่มเรื่องใหม่
+
+### 🤖 สร้างซีรีย์ด้วย Claude Code (MCP)
+
+ให้ Claude Code วางเรื่อง เขียนตอน สั่งสร้างทีละฉาก ตรวจภาพ และส่งออกไฟล์ให้ทั้งซีรีย์ผ่าน MCP server ชื่อ `h3-studio` ที่ฝังอยู่ใน backend (endpoint `/mcp`) — ดูความคืบหน้าและกด พัก/เล่นต่อ/ยกเลิก ได้ที่หน้า `/series` ของเว็บ
+
+1. **เปิด backend ก่อน** แล้วค่อยเปิด Claude Code (backend ต้องรันอยู่ที่พอร์ต 8000 ตลอดเวลาที่สร้างซีรีย์)
+2. เปิด Claude Code ในโฟลเดอร์โปรเจคนี้ — server ถูกลงทะเบียนไว้แล้วในไฟล์ `.mcp.json` ที่รากของโปรเจค (กดอนุมัติ server เมื่อ Claude Code ถาม)
+3. พิมพ์ `/mcp` ใน Claude Code เพื่อเช็กว่า `h3-studio` เชื่อมต่อแล้ว
+4. เริ่มด้วย prompt `new_series` (พิมพ์ `/mcp__h3-studio__new_series <ไอเดียของคุณ>`) — Claude จะอ่านคู่มือ วางโครงเรื่องให้คุณอนุมัติก่อน แล้วสร้างซีรีย์ตามลำดับ
+5. ไฟล์ทั้งหมดอยู่ใน `outputs/series/<id>/` (รูปตัวละคร `refs/`, ภาพรีวิว `review/`, ไฟล์ส่งออก `export/` พร้อม `manifest.json`)
+
+> Claude ฟังเสียงไม่ได้ — บทพูดและปากตรงเสียง (lip-sync) ให้คุณเปิดดูเองที่หน้า `/series`
+
+> **ความปลอดภัย:** `/mcp` รับเฉพาะการเชื่อมต่อจากเครื่องเดียวกัน (loopback) เป็นค่าเริ่มต้น เพราะ `series_add_character` อ่านไฟล์รูปตาม path บนเครื่อง backend ได้ และ backend ไม่มีระบบล็อกอิน ถ้าตั้งใจให้เครื่องอื่นใน LAN ใช้ ให้ตั้ง `"mcp_allow_lan": true` ใน `backend\config.json` แล้วรีสตาร์ท backend
+
+| tool | ทำอะไร |
+|---|---|
+| `studio_status` | backend/ComfyUI พร้อมไหม, VRAM, โหมด Local/RunPod, จำนวนงานในคิว, ค่าที่อนุญาต (duration / aspect / megapixels), รายการซีรีย์ย่อ |
+| `series_guide` | คู่มือสำหรับ Claude: โครงสร้างซีรีย์แนวตั้ง, วิธีเลือก mode, ข้อจำกัดโมเดล, แนวเขียน prompt |
+| `series_create` | สร้างซีรีย์ (title, logline, style_notes, aspect_ratio, megapixels, low_vram, run_mode) |
+| `series_add_character` | เพิ่ม/แก้ตัวละคร: name, description, `image_paths[]` (path ไฟล์รูปบนเครื่อง backend หรือ path ใต้ `outputs/`) และ/หรือ `casting_prompt` |
+| `series_write_episode` | เพิ่มตอนใหม่ หรือเขียนทับตอนที่ยังไม่เริ่ม: title, synopsis, caption, hashtags, scenes[] |
+| `series_update_scene` | แก้ฉาก (prompt / mode / duration / characters / seed) และ `regenerate` |
+| `series_control` | `start` / `pause` / `resume` / `finish` (ประกาศว่าเรื่องจบ) / `cancel` |
+| `series_status` | ความคืบหน้ารายตอน/ฉาก, ฉากที่กำลังรัน + %, error, เวลาที่เหลือโดยประมาณ |
+| `series_wait` | รอจนมีเหตุการณ์ถัดไป (ฉากเสร็จ/พัง, ตอนเสร็จ, หยุด, จบ) หรือ timeout แล้วคืนสถานะ |
+| `series_review` | คืน**รูปภาพ**ให้ Claude ดู: ระบุฉาก → เฟรมกระจายทั่วคลิป + prompt; ระบุแค่ตอน → last frame ของทุกฉากในตอน; ระบุตัวละคร → รูปอ้างอิงของตัวละครนั้น |
+| `series_export` | คัดลอกไฟล์ตอนที่เสร็จไป `outputs/series/<id>/export/` ตั้งชื่อ `EP01 - <ชื่อตอน>.mp4` + ปก + `manifest.json` |
 
 ### ✨ ผู้ช่วยเขียน Prompt (Gemma VLM)
 

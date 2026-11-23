@@ -18,10 +18,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import config
+from app.mcp_server import build_mcp, mcp_asgi_app
 from app.routers import generations, llm, media, series, system, uploads, workflows
 from app.services.llm_service import llm_service
 from app.services.queue_service import queue_service
-from app.services.series_runtime import series_runner, series_store
+from app.services.series_runtime import series_gateway, series_runner, series_service, series_store
+
+# MCP server (สร้างครั้งเดียวตอน import: session_manager เข้า run() ได้ครั้งเดียวต่อ server)
+mcp_server = build_mcp(series_service, series_store, series_gateway, config.OUTPUTS_DIR)
+mcp_app = mcp_asgi_app(mcp_server, allow_lan=config.MCP_ALLOW_LAN)
 
 
 @asynccontextmanager
@@ -34,6 +39,7 @@ async def lifespan(app: FastAPI):
             - เตรียม outputs folders
             - เริ่ม queue worker
             - เริ่ม LLM idle watchdog ถ้ามี
+            - เปิด session manager ของ MCP server
 
         ตอน shutdown:
             - ยกเลิก watchdog
@@ -52,7 +58,8 @@ async def lifespan(app: FastAPI):
         watchdog_task = asyncio.create_task(llm_service.idle_watchdog())
 
     try:
-        yield
+        async with mcp_server.session_manager.run():
+            yield
     finally:
         if watchdog_task is not None:
             watchdog_task.cancel()
@@ -114,3 +121,7 @@ def root():
         "docs": "/docs",
         "engine": "comfyui-ref2va",
     }
+
+
+# ต้อง mount เป็นลำดับสุดท้าย: route อื่นทั้งหมดต้องมาก่อน และ /mcp ไม่ต้อง redirect ด้วย trailing slash
+app.mount("/", mcp_app)

@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "h3-studio": { "type": "http", "url": "http://127.0.0.1:8000/mcp" }
+  }
+}
