@@ -138,5 +138,6 @@ series_gateway = RealGateway()
 series_service = SeriesService(
     series_store, series_gateway, config.OUTPUTS_DIR,
     config.ALLOWED_IMAGE_EXTENSIONS, config.UPLOAD_MAX_FILE_SIZE_BYTES,
+    allow_external_images=not config.MCP_ALLOW_LAN,
 )
 series_runner = SeriesRunner(series_store, series_gateway)

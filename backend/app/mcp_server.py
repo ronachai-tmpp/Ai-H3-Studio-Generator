@@ -7,11 +7,14 @@ mount เข้า FastAPI ที่ /mcp (streamable HTTP แบบ stateless +
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import anyio.to_thread
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from fastapi import FastAPI
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.services.series_export import export_series, review_images
@@ -32,7 +35,9 @@ from app.services.series_store import SeriesStore
 from app.services.workflow_service import ALLOWED_ASPECT_RATIOS
 
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
+LOOPBACK_ORIGIN_HOSTS = ("127.0.0.1", "localhost", "::1")
 FORBIDDEN_MESSAGE = "MCP รับเฉพาะการเชื่อมต่อจากเครื่องนี้ (ตั้ง mcp_allow_lan เพื่อเปิด)"
+FORBIDDEN_ORIGIN_MESSAGE = "MCP ไม่รับคำขอจากหน้าเว็บของเว็บไซต์อื่น (Origin ต้องเป็น localhost)"
 WAIT_MIN_SECONDS = 5
 WAIT_MAX_SECONDS = 300
 
@@ -271,17 +276,38 @@ def build_mcp(service: SeriesService, store: SeriesStore, gateway: StudioGateway
     return server
 
 
-class LoopbackOnly:
-    """ASGI wrapper: ปฏิเสธ http request ที่ไม่ได้มาจาก loopback"""
+class McpGuard:
+    """ASGI wrapper ของ /mcp
 
-    def __init__(self, app: ASGIApp):
+    - ทุกโหมด: ปฏิเสธคำขอที่มี Origin ไม่ใช่ localhost (กันหน้าเว็บอื่นยิงเข้ามาผ่านเบราว์เซอร์) —
+      client ของ MCP อย่าง Claude Code ไม่ส่ง Origin จึงผ่าน
+    - allow_lan เป็น false: รับเฉพาะ client IP แบบ loopback
+    """
+
+    def __init__(self, app: ASGIApp, allow_lan: bool):
         self.app = app
+        self.allow_lan = allow_lan
+
+    @staticmethod
+    def _origin_allowed(scope: Scope) -> bool:
+        for key, value in scope.get("headers", []):
+            if key == b"origin":
+                try:
+                    host = urlsplit(value.decode("latin-1")).hostname
+                except ValueError:
+                    return False
+                return host in LOOPBACK_ORIGIN_HOSTS
+        return True
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
             client = scope.get("client")
-            if client is None or client[0] not in LOOPBACK_HOSTS:
+            if not self.allow_lan and (client is None or client[0] not in LOOPBACK_HOSTS):
                 response = JSONResponse({"detail": FORBIDDEN_MESSAGE}, status_code=403)
+                await response(scope, receive, send)
+                return
+            if not self._origin_allowed(scope):
+                response = JSONResponse({"detail": FORBIDDEN_ORIGIN_MESSAGE}, status_code=403)
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
@@ -290,8 +316,9 @@ class LoopbackOnly:
 def mcp_asgi_app(server: MCPServer, allow_lan: bool) -> ASGIApp:
     """ASGI app ของ streamable HTTP ที่ path /mcp (เรียกได้ครั้งเดียวต่อ server เพราะสร้าง session_manager)
 
-    ค่าเริ่มต้น: ป้องกัน DNS rebinding (Host ต้องเป็น localhost/127.0.0.1) และรับเฉพาะ loopback
-    allow_lan: ปิดการเช็ก Host เพราะเครื่องอื่นเรียกด้วย IP ของ LAN และไม่เช็ก client address
+    ค่าเริ่มต้น: ป้องกัน DNS rebinding ของแพ็กเกจ (Host ต้องเป็น localhost/127.0.0.1)
+    allow_lan: ปิดการเช็ก Host ของแพ็กเกจเพราะเครื่องอื่นเรียกด้วย IP ของ LAN
+    การเช็ก Origin และ client IP ทำใน McpGuard เสมอ ไม่ขึ้นกับค่าของแพ็กเกจ
     """
     kwargs: dict = {}
     if allow_lan:
@@ -299,4 +326,9 @@ def mcp_asgi_app(server: MCPServer, allow_lan: bool) -> ASGIApp:
     app = server.streamable_http_app(
         streamable_http_path="/mcp", json_response=True, stateless_http=True, **kwargs,
     )
-    return app if allow_lan else LoopbackOnly(app)
+    return McpGuard(app, allow_lan)
+
+
+def register_mcp(app: FastAPI, mcp_app: ASGIApp) -> None:
+    """ลงทะเบียนเฉพาะ path /mcp (ไม่ใช้ Mount("/") เพราะจะดัก path อื่นทั้งหมด ทำให้ redirect ท้าย / และ 405 หาย)"""
+    app.router.routes.append(Route("/mcp", endpoint=mcp_app, include_in_schema=False))

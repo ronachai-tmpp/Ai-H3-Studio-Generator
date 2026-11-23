@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import config
-from app.mcp_server import build_mcp, mcp_asgi_app
+from app.mcp_server import build_mcp, mcp_asgi_app, register_mcp
 from app.routers import generations, llm, media, series, system, uploads, workflows
 from app.services.llm_service import llm_service
 from app.services.queue_service import queue_service
@@ -123,5 +123,5 @@ def root():
     }
 
 
-# ต้อง mount เป็นลำดับสุดท้าย: route อื่นทั้งหมดต้องมาก่อน และ /mcp ไม่ต้อง redirect ด้วย trailing slash
-app.mount("/", mcp_app)
+# ลงทะเบียนเฉพาะ /mcp (ไม่ mount "/" เพราะจะทำให้ redirect ท้าย / และ 405 ของ route อื่นหาย)
+register_mcp(app, mcp_app)

@@ -87,12 +87,14 @@ def reset_scene(series: Series, gateway: StudioGateway, episode_number: int,
 
 class SeriesService:
     def __init__(self, store: SeriesStore, gateway: StudioGateway, outputs_dir: Path,
-                 allowed_image_extensions: Sequence[str], max_image_bytes: int):
+                 allowed_image_extensions: Sequence[str], max_image_bytes: int,
+                 allow_external_images: bool = True):
         self.store = store
         self.gateway = gateway
         self.outputs_dir = Path(outputs_dir)
         self.allowed_image_extensions = tuple(e.lower() for e in allowed_image_extensions)
         self.max_image_bytes = max_image_bytes
+        self.allow_external_images = allow_external_images
 
     # ---------- ภายใน ----------
     @staticmethod
@@ -120,8 +122,15 @@ class SeriesService:
 
     def _resolve_image(self, raw: str) -> Path:
         path = Path(raw)
-        if not path.is_absolute():
+        relative = not path.is_absolute()
+        if relative:
             path = self.outputs_dir / path
+        if relative or not self.allow_external_images:
+            # path แบบ relative ห้ามหลุดออกนอก outputs/ ด้วย ".." และโหมด LAN ห้ามอ่านไฟล์นอก outputs/ เลย
+            if not path.resolve().is_relative_to(self.outputs_dir.resolve()):
+                if relative:
+                    raise SeriesError(f"path รูปต้องอยู่ใต้ outputs/ (ห้ามใช้ ..): {raw}")
+                raise SeriesError(f"โหมด LAN (mcp_allow_lan) ใช้ได้เฉพาะรูปที่อยู่ใต้ outputs/ เท่านั้น: {raw}")
         if not path.is_file():
             raise SeriesError(f"ไม่พบไฟล์รูป: {raw}")
         if path.suffix.lower() not in self.allowed_image_extensions:
@@ -194,6 +203,12 @@ class SeriesService:
     def write_episode(self, series_id: str, title: str, scenes: list[dict], synopsis: str = "",
                       caption: str = "", hashtags: list[str] | None = None,
                       episode_number: int | None = None) -> Episode:
+        for i, d in enumerate(scenes, start=1):
+            unknown = sorted(set(d) - set(_SCENE_KEYS) - {"index"})
+            if unknown:
+                raise SeriesError(
+                    f"ฉากที่ {i} มี key ที่ไม่รู้จัก: {unknown} (ใช้ได้: {list(_SCENE_KEYS)})"
+                )
         with self.store.lock:
             series = self.store.get(series_id).model_copy(deep=True)
             try:

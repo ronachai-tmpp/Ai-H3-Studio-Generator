@@ -4,10 +4,10 @@ import time
 from contextlib import asynccontextmanager
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
-from app.mcp_server import build_mcp, mcp_asgi_app
+from app.mcp_server import build_mcp, mcp_asgi_app, register_mcp
 from app.services.series_guide import SERIES_GUIDE, new_series_prompt
 
 EXPECTED_TOOLS = {"studio_status", "series_guide", "series_create", "series_add_character",
@@ -31,7 +31,14 @@ def make_client(service, store, gateway, outputs, allow_lan=False, client=("127.
     def root():
         return {"ok": True}
 
-    app.mount("/", asgi)
+    router = APIRouter()
+
+    @router.get("/")
+    def listing():
+        return []
+
+    app.include_router(router, prefix="/api/things")
+    register_mcp(app, asgi)
     # base_url ชี้ 127.0.0.1 เพราะ server เปิดการป้องกัน DNS rebinding (Host ต้องเป็น loopback)
     return TestClient(app, base_url="http://127.0.0.1:8000", client=client)
 
@@ -108,3 +115,42 @@ def test_lan_client_allowed_when_enabled(service, store, gateway, outputs):
         r = c.post("/mcp", headers={**HEADERS, "Host": "192.168.1.5:8000"},
                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         assert r.status_code == 200
+
+
+def test_slashless_path_still_redirects(mcp):
+    assert mcp.get("/api/things", follow_redirects=False).status_code == 307
+
+
+def test_wrong_method_on_existing_route_is_405(mcp):
+    assert mcp.delete("/", follow_redirects=False).status_code == 405
+
+
+def test_unknown_path_from_lan_client_is_404_not_403(service, store, gateway, outputs):
+    with make_client(service, store, gateway, outputs, client=("192.168.1.50", 50000)) as c:
+        assert c.get("/nope").status_code == 404
+
+
+def test_lan_mode_rejects_foreign_origin(service, store, gateway, outputs):
+    with make_client(service, store, gateway, outputs, allow_lan=True, client=("192.168.1.50", 50000)) as c:
+        r = c.post("/mcp", headers={**HEADERS, "Host": "192.168.1.5:8000", "Origin": "https://evil.example"},
+                   json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        assert r.status_code == 403
+
+
+def test_lan_mode_accepts_localhost_origin(service, store, gateway, outputs):
+    with make_client(service, store, gateway, outputs, allow_lan=True, client=("192.168.1.50", 50000)) as c:
+        r = c.post("/mcp", headers={**HEADERS, "Host": "192.168.1.5:8000", "Origin": "http://localhost:3000"},
+                   json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        assert r.status_code == 200
+
+
+def test_loopback_mode_rejects_foreign_origin(mcp):
+    r = mcp.post("/mcp", headers={**HEADERS, "Origin": "https://evil.example"},
+                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert r.status_code == 403
+
+
+def test_loopback_mode_rejects_foreign_host(mcp):
+    r = mcp.post("/mcp", headers={**HEADERS, "Host": "evil.example:8000"},
+                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert 400 <= r.status_code < 500

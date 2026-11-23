@@ -154,3 +154,39 @@ def test_cancel_failure_is_logged_not_raised(service, store, gateway, caplog):
     with caplog.at_level("WARNING"):
         assert service.control(s.id, "cancel").status == "CANCELLED"
     assert any("job-3" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+def _service(store, gateway, outputs, allow_external):
+    from app.services.series_service import SeriesService
+    return SeriesService(store, gateway, outputs, [".png", ".jpg"], 1_000_000,
+                         allow_external_images=allow_external)
+
+
+def test_lan_mode_rejects_external_image_and_accepts_outputs_path(store, gateway, outputs, tmp_path):
+    svc = _service(store, gateway, outputs, False)
+    s = svc.create_series("x"); src = tmp_path / "face.jpg"; src.write_bytes(b"j")
+    (outputs / "frames" / "f.jpg").write_bytes(b"j")
+    with pytest.raises(SeriesError, match="outputs/"):
+        svc.set_character(s.id, "Mali", image_paths=[str(src)])
+    assert svc.set_character(s.id, "Mali", image_paths=["frames/f.jpg"]).reference_images
+
+
+@pytest.mark.parametrize("allow_external", [True, False])
+def test_relative_path_cannot_escape_outputs(store, gateway, outputs, allow_external):
+    svc = _service(store, gateway, outputs, allow_external)
+    (outputs.parent / "x.jpg").write_bytes(b"j")
+    s = svc.create_series("x")
+    with pytest.raises(SeriesError):
+        svc.set_character(s.id, "Mali", image_paths=["../x.jpg"])
+
+
+def test_write_episode_rejects_unknown_scene_key(service):
+    s = service.create_series("x")
+    with pytest.raises(SeriesError, match="duration"):
+        service.write_episode(s.id, "e", [{"prompt": "p", "mode": "text", "duration": 8}])
+
+
+def test_write_episode_ignores_index_key(service):
+    s = service.create_series("x")
+    ep = service.write_episode(s.id, "e", [{"index": 7, "prompt": "p", "mode": "text"}])
+    assert ep.scenes[0].index == 1
