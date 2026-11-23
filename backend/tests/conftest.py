@@ -53,3 +53,52 @@ def make_series(outputs):
         return Series(**data)
 
     return _make
+
+
+@pytest.fixture
+def gateway(outputs):
+    from tests.fakes import FakeGateway
+
+    return FakeGateway(outputs)
+
+
+@pytest.fixture
+def service(store, gateway, outputs):
+    from app.services.series_service import SeriesService
+
+    return SeriesService(store, gateway, outputs, [".png", ".jpg", ".jpeg", ".webp"], 1_000_000)
+
+
+@pytest.fixture
+def done_series(service, store, gateway, make_series, outputs) -> Series:
+    """ซีรีส์ตัวอย่างที่ทุกฉากและทุกตอน DONE (ไฟล์จริงจาก FakeGateway.finish)"""
+    series = make_series()
+    for episode in series.episodes:
+        for scene in episode.scenes:
+            job_id = gateway.submit_job(
+                prompt=scene.prompt, job_type="T2V", megapixels=series.megapixels,
+                aspect_ratio=series.aspect_ratio, duration_seconds=scene.duration_seconds,
+                seed=scene.seed,
+            )
+            gateway.finish(job_id)
+            snap = gateway.get_job(job_id)
+            scene.status = "DONE"
+            scene.job_id = job_id
+            scene.progress = 100
+            scene.video_path = snap["video_path"]
+            scene.thumbnail_path = snap["thumbnail_path"]
+            scene.last_frame_path = f"frames/{job_id}_last.jpg"
+            scene.started_at = snap["started_at"]
+            scene.finished_at = snap["finished_at"]
+        final = f"videos/series_{series.id}_ep{episode.number:02d}_final.mp4"
+        thumb = f"thumbnails/series_{series.id}_ep{episode.number:02d}_final.jpg"
+        for rel in (final, thumb):
+            (outputs / rel).write_bytes(b"x")
+        episode.status = "DONE"
+        episode.final_video_path = final
+        episode.thumbnail_path = thumb
+        episode.duration = 10.0
+    series.status = "DONE"
+    series.story_complete = True
+    store.add(series)
+    return series
