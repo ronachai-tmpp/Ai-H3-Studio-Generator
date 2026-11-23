@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -154,3 +155,29 @@ def test_loopback_mode_rejects_foreign_host(mcp):
     r = mcp.post("/mcp", headers={**HEADERS, "Host": "evil.example:8000"},
                  json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert 400 <= r.status_code < 500
+
+
+def test_wait_does_not_block_other_requests_while_store_lock_is_held(mcp, store, running):
+    held, release = threading.Event(), threading.Event()
+
+    def hold_lock():
+        with store.lock:
+            held.set()
+            release.wait(3)          # ปล่อยเองหลัง 3 วินาที กันค้างถ้า event loop ถูกบล็อก
+
+    holder = threading.Thread(target=hold_lock); holder.start(); held.wait()
+    cursor = len(store._events.get(running.id, []))
+    result: list[str] = []
+    waiter = threading.Thread(target=lambda: result.append(call(
+        mcp, "series_wait", series_id=running.id, timeout_seconds=5, after_event=cursor,
+    )["content"][0]["text"]))
+    waiter.start()
+    time.sleep(0.3)                  # ให้ series_wait เริ่มรอ lock ก่อน
+    t = time.monotonic()
+    assert mcp.get("/").json() == {"ok": True}
+    elapsed = time.monotonic() - t
+    release.set(); holder.join()
+    store.save(store.get(running.id), "EP01 scene 1 DONE")
+    waiter.join(10)
+    assert elapsed < 1.0
+    assert result and "EP01 scene 1 DONE" in result[0]

@@ -82,3 +82,16 @@ def _image_size(ffmpeg: str, path) -> tuple[int, int]:
                          check=True, capture_output=True, text=True).stdout.strip()
     w, h = out.split(",")
     return int(w), int(h)
+
+
+def test_sample_frames_returns_only_this_call(outputs):
+    ffmpeg = media_processor._find_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("ไม่พบ ffmpeg")
+    video = outputs / "videos" / "clip2.mp4"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=2",
+                    "-pix_fmt", "yuv420p", str(video)], check=True, capture_output=True)
+    g = RealGateway(queue=StubQueue(), outputs_dir=outputs)
+    assert len(g.sample_frames("videos/clip2.mp4", "series/x/review/s", 8)) == 8
+    rels = g.sample_frames("videos/clip2.mp4", "series/x/review/s", 4)
+    assert rels == [f"series/x/review/s/frame_{i:03d}.jpg" for i in range(1, 5)]

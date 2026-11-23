@@ -80,3 +80,13 @@ def test_review_rejects_bad_requests(store, gateway, done_series, make_series):
     with pytest.raises(SeriesError): review_images(store, gateway, done_series.id, episode=9)
     live = store.get(done_series.id); live.episodes[0].scenes[0].status = "PENDING"; store.save(live)
     with pytest.raises(SeriesError): review_images(store, gateway, done_series.id, episode=1, scene=1)
+
+
+def test_review_frames_of_a_new_video_go_to_a_new_folder(store, gateway, done_series):
+    _, first = review_images(store, gateway, done_series.id, episode=1, scene=1, frames=8)
+    live = store.get(done_series.id); sc = live.episodes[0].scenes[0]
+    sc.job_id, sc.video_path = "job-99", "videos/job-99.mp4"; store.save(live)
+    _, second = review_images(store, gateway, done_series.id, episode=1, scene=1, frames=4)
+    first_dir, second_dir = {p.rsplit("/", 1)[0] for p in first}, {p.rsplit("/", 1)[0] for p in second}
+    assert len(second) == 4 and first_dir.isdisjoint(second_dir)
+    assert second_dir == {f"series/{done_series.id}/review/ep01_s01_job-99"}

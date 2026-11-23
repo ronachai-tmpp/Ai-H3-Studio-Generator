@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import anyio.to_thread
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from fastapi import FastAPI
@@ -231,17 +230,18 @@ def build_mcp(service: SeriesService, store: SeriesStore, gateway: StudioGateway
             return f"ERROR: {exc}"
 
     @server.tool()
-    async def series_wait(series_id: str, timeout_seconds: int = 120, after_event: int = -1) -> str:
+    def series_wait(series_id: str, timeout_seconds: int = 120, after_event: int = -1) -> str:
         """Block until the next series event (scene done/failed, episode done, pause, finish) or timeout, then return the events and the status.
 
         timeout_seconds is clamped to 5-300. after_event is the event_cursor from an earlier
         status (-1 = only events from now on).
         """
+        # tool แบบ sync: แพ็กเกจ mcp รันใน worker thread จึงรอ lock ของ store ได้โดยไม่บล็อก event loop
         timeout = max(WAIT_MIN_SECONDS, min(WAIT_MAX_SECONDS, timeout_seconds))
         try:
             after = store.cursor(series_id) if after_event < 0 else after_event
             store.get(series_id)  # ตรวจว่ามีซีรีส์นี้ก่อนรอ
-            _, events = await anyio.to_thread.run_sync(store.wait_events, series_id, after, float(timeout))
+            _, events = store.wait_events(series_id, after, float(timeout))
             lines = [f"events: {', '.join(events)}" if events else "events: none (timeout)"]
             lines.append(_status_text(store, series_id))
         except SeriesError as exc:

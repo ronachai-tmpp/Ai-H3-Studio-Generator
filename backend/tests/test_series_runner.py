@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from app.services.series_models import waiting_for
 from app.services.series_runner import SeriesRunner
 from app.services.series_store import SeriesStore
@@ -234,3 +236,80 @@ def test_merge_result_dropped_when_regenerated_during_concat(service, runner, ga
     ep = store.get(running.id).episodes[0]
     _, events = store.wait_events(running.id, c, timeout=0.1)
     assert ep.status != "DONE" and ep.final_video_path is None and "EP01 DONE" not in events
+
+
+def lock_is_free(lock) -> bool:
+    """จริงเมื่อ thread อื่นจับ lock ได้ทันที (แปลว่า thread ที่เรียกไม่ได้ถือ lock อยู่)"""
+    got: list[bool] = []
+
+    def probe():
+        ok = lock.acquire(blocking=False)
+        got.append(ok)
+        if ok:
+            lock.release()
+
+    t = threading.Thread(target=probe); t.start(); t.join()
+    return got[0]
+
+
+def record_lock_state(gateway, store, names):
+    """ห่อ method ของ gateway ให้จดว่า lock ของ store ว่างไหมตอนถูกเรียก"""
+    seen: dict[str, list[bool]] = {n: [] for n in names}
+    for name in names:
+        original = getattr(gateway, name)
+
+        def wrapped(*a, _name=name, _original=original, **k):
+            seen[_name].append(lock_is_free(store.lock))
+            return _original(*a, **k)
+
+        setattr(gateway, name, wrapped)
+    return seen
+
+
+def test_ref_and_chain_gateway_io_runs_outside_store_lock(runner, gateway, running, store, outputs):
+    seen = record_lock_state(gateway, store, ["push_image", "comfy_input_exists", "extract_frame"])
+    runner.tick(); gateway.finish("job-1"); runner.tick(); runner.tick()     # ฉาก ref
+    gateway.finish("job-2"); runner.tick()
+    (outputs / "frames" / "job-2_last.jpg").unlink()                       # บังคับให้ดึงเฟรมใหม่
+    runner.tick()                                                           # ฉาก chain
+    assert [j["job_type"] for j in gateway.submitted] == ["T2V", "REF2VA", "FL2VA"]
+    assert len(seen["push_image"]) == 2 and len(seen["extract_frame"]) == 1
+    assert all(all(v) for v in seen.values())
+
+
+def test_reused_ref_image_check_runs_outside_store_lock(service, runner, gateway, store, tmp_path):
+    img = tmp_path / "a.jpg"; img.write_bytes(b"a")
+    s = service.create_series("x"); service.set_character(s.id, "mali", image_paths=[str(img)])
+    ref = {"prompt": "p", "mode": "ref", "characters": ["mali"]}
+    service.write_episode(s.id, "one", [ref, ref]); service.control(s.id, "start")
+    runner.tick(); gateway.finish("job-1"); runner.tick()
+    seen = record_lock_state(gateway, store, ["comfy_input_exists"])
+    runner.tick()
+    assert seen["comfy_input_exists"] == [True] and len(gateway.pushed) == 1 and len(gateway.submitted) == 2
+
+
+def test_pause_during_push_drops_the_submit(service, runner, gateway, running, store):
+    runner.tick(); gateway.finish("job-1"); runner.tick()
+    original = gateway.push_image
+
+    def push_then_pause(rel):
+        service.control(running.id, "pause")
+        return original(rel)
+
+    gateway.push_image = push_then_pause
+    runner.tick()
+    s = store.get(running.id)
+    assert len(gateway.submitted) == 1 and (s.status, s.pause_reason) == ("PAUSED", "user")
+    assert s.episodes[0].scenes[1].job_id is None and s.episodes[0].scenes[1].status == "PENDING"
+
+
+def test_push_error_pauses_series(runner, gateway, running, store):
+    runner.tick(); gateway.finish("job-1"); runner.tick()
+
+    def boom(rel):
+        raise RuntimeError("upload timeout")
+
+    gateway.push_image = boom
+    runner.tick()
+    s = store.get(running.id)
+    assert (s.status, s.pause_reason) == ("PAUSED", "error") and "upload timeout" in s.pause_message

@@ -91,7 +91,10 @@ class RealGateway:
         return media_processor.process_video_outputs(self._abs(video_rel), self._abs(thumb_rel))
 
     def sample_frames(self, video_rel: str, out_dir_rel: str, count: int, max_edge: int = 512) -> list[str]:
-        """สุ่มเฟรมกระจายทั้งคลิป แล้วย่อให้ด้านยาวสุดไม่เกิน max_edge (ไม่ขยายรูปที่เล็กกว่า)"""
+        """สุ่มเฟรมกระจายทั้งคลิป แล้วย่อให้ด้านยาวสุดไม่เกิน max_edge (ไม่ขยายรูปที่เล็กกว่า)
+
+        คืนเฉพาะไฟล์ที่รอบนี้เขียน (frame_001 .. frame_<count> ที่มีอยู่จริง) ไม่รวมไฟล์เก่าในโฟลเดอร์
+        """
         ffmpeg = media_processor._find_ffmpeg()
         if not ffmpeg:
             raise RuntimeError("ไม่พบ ffmpeg — ติดตั้งหรือตั้งค่า ffmpeg_path ก่อน")
@@ -110,7 +113,8 @@ class RealGateway:
             "-frames:v", str(count), "-q:v", "3",
             str(out_dir / "frame_%03d.jpg"),
         ], config.FFMPEG_TIMEOUT_SECONDS * 4)
-        return [f"{out_dir_rel.rstrip('/')}/{p.name}" for p in sorted(out_dir.glob("frame_*.jpg"))]
+        names = [f"frame_{i:03d}.jpg" for i in range(1, count + 1)]
+        return [f"{out_dir_rel.rstrip('/')}/{name}" for name in names if (out_dir / name).is_file()]
 
     # ---------- สถานะ ----------
     def studio_info(self) -> dict:

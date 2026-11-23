@@ -1,6 +1,9 @@
 """ช่องทางที่ Series Runner ใช้คุยกับส่วนอื่นของ Studio (คิวงาน, ComfyUI, ffmpeg)
 
 แยกเป็น Protocol เพื่อให้ทดสอบด้วย FakeGateway ได้โดยไม่ต้องมี ComfyUI จริง
+ห้ามเรียก I/O ของ gateway ขณะถือ store.lock ยกเว้นคิวงานในกระบวนการเดียวกัน (submit_job, get_job,
+cancel_job) และการเช็กไฟล์บนเครื่องที่เร็ว (output_exists, find_output_video, comfy_base_url) —
+push_image ในโหมด RunPod เป็น HTTP ที่นานเป็นนาที, comfy_input_exists และ ffmpeg ก็ช้า
 """
 
 from __future__ import annotations

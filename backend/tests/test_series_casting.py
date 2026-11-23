@@ -144,3 +144,26 @@ def test_tick_exception_does_not_kill_thread(store, gateway, running, monkeypatc
     monkeypatch.setattr(r, "tick", boom)
     r.start(); time.sleep(0.2); r.stop()
     assert len(calls) > 1
+
+
+def test_cast_frame_extract_runs_outside_store_lock(runner, gateway, casting, store):
+    from tests.test_series_runner import record_lock_state
+    seen = record_lock_state(gateway, store, ["extract_frame"])
+    runner.tick(); gateway.finish("job-1"); runner.tick()
+    assert seen["extract_frame"] == [True]
+    assert store.get(casting.id).pause_reason == "casting"
+
+
+def test_recast_during_extract_drops_the_old_result(service, runner, gateway, casting, store):
+    runner.tick(); gateway.finish("job-1")
+    original = gateway.extract_frame
+
+    def extract_then_recast(*a, **k):
+        service.set_character(casting.id, "Mali", casting_prompt="older woman")
+        return original(*a, **k)
+
+    gateway.extract_frame = extract_then_recast
+    runner.tick()
+    ch = store.get(casting.id).characters[0]
+    assert ch.reference_images == [] and ch.casting_prompt == "older woman" and ch.casting_attempts == 0
+    assert store.get(casting.id).status == "RUNNING"

@@ -126,7 +126,10 @@ def review_images(store: SeriesStore, gateway: StudioGateway, series_id: str, *,
         if sc.status != "DONE" or not sc.video_path:
             raise SeriesError(f"ฉากที่ {scene} ของตอนที่ {episode} ยังไม่เสร็จ")
         count = max(1, min(8, frames))
+        # ใส่ job_id ในชื่อโฟลเดอร์: สร้างฉากใหม่แล้วจะไม่ปนกับเฟรมของคลิปเก่า (ไฟล์เก่าไม่ถูกลบ)
         out_dir = f"series/{series.id}/review/ep{ep.number:02d}_s{sc.index:02d}"
+        if sc.job_id:
+            out_dir += f"_{sc.job_id}"
         images = gateway.sample_frames(sc.video_path, out_dir, count, max_edge=512)
         text = (f"ตอนที่ {ep.number} ฉากที่ {sc.index} (mode {sc.mode}, "
                 f"{sc.duration_seconds} วินาที)\nprompt: {sc.prompt}")

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import secrets
 import threading
@@ -90,39 +91,45 @@ class SeriesRunner:
 
     # ---------- หนึ่งซีรีส์ ----------
     def _advance(self, series_id: str) -> None:
-        merge = None
+        """ใต้ lock: ตัดสินใจขั้นถัดไป ขั้นที่ไม่ต้องรอ I/O ทำเสร็จในนี้เลย
+
+        ขั้นที่ต้องคุยกับ ComfyUI/ffmpeg (อัปโหลดรูป ดึงเฟรม รวมวิดีโอ) คืนเป็นงานให้ทำนอก lock
+        งานนั้นกลับเข้า lock เอง ตรวจซ้ำว่ายังต้องทำขั้นนี้อยู่ แล้วค่อยบันทึกผล
+        """
+        work: Callable[[], None] | None = None
         with self.store.lock:
             series = self.store.get(series_id)
             if series.status != "RUNNING":
                 return
-            if self._advance_casting(series):
-                return
-            episode = next((e for e in series.episodes if e.status != "DONE"), None)
-            if episode is None:
+            casting = next((c for c in series.characters if c.casting_job_id), None)
+            uncast = next((c for c in series.characters if needs_casting(c)), None)
+            episode, scene = self._current(series)
+            if casting is not None:
+                work = self._poll_casting(series, casting)
+            elif uncast is not None:
+                self._submit_casting(series, uncast)
+            elif episode is None:
                 if series.story_complete:
                     series.status = "DONE"
                     self.store.save(series, "series DONE")
-                return
-            scene = next((s for s in episode.scenes if s.status != "DONE"), None)
-            if scene is None:
-                merge = self._prepare_merge(series, episode)
+            elif scene is None:
+                work = self._prepare_merge(series, episode)
             elif scene.job_id is None:
-                self._submit(series, episode, scene)
+                work = self._prepare_submit(series, episode, scene)
             else:
                 self._poll(series, episode, scene)
-        if merge is not None:
-            self._merge(series_id, *merge)
+        if work is not None:
+            work()
+
+    @staticmethod
+    def _current(series: Series) -> tuple[Episode | None, Scene | None]:
+        """ตอนแรกที่ยังไม่ DONE กับฉากแรกในตอนนั้นที่ยังไม่ DONE"""
+        episode = next((e for e in series.episodes if e.status != "DONE"), None)
+        scene = next((s for s in episode.scenes if s.status != "DONE"), None) if episode else None
+        return episode, scene
 
     # ---------- คัดตัวละคร (auto-casting) ----------
-    def _advance_casting(self, series: Series) -> bool:
-        """คืน True ถ้ามีการคัดตัวละครค้างอยู่ในซีรีส์นี้ (รอบนี้จบแค่นี้)"""
-        character = next((c for c in series.characters if c.casting_job_id), None)
-        if character is not None:
-            self._poll_casting(series, character)
-            return True
-        character = next((c for c in series.characters if needs_casting(c)), None)
-        if character is None:
-            return False
+    def _submit_casting(self, series: Series, character: Character) -> None:
         character.casting_job_id = self.gateway.submit_job(
             prompt=character.casting_prompt, job_type=job_type_for("text", series.low_vram),
             megapixels=series.megapixels, aspect_ratio=series.aspect_ratio,
@@ -130,9 +137,9 @@ class SeriesRunner:
         )
         self._submitted.add(character.casting_job_id)
         self.store.save(series, f"casting {character.name} QUEUED")
-        return True
 
-    def _poll_casting(self, series: Series, character: Character) -> None:
+    def _poll_casting(self, series: Series, character: Character) -> Callable[[], None] | None:
+        """ตามผลงานคัดตัวละคร; งานเสร็จ → คืนงานดึงเฟรมให้ทำนอก lock"""
         job_id = character.casting_job_id
         job = self.gateway.get_job(job_id)
         if job is None:
@@ -142,38 +149,52 @@ class SeriesRunner:
             elif job_id in self._submitted:
                 character.casting_job_id = None
                 self._pause(series, "user", None, f"casting {character.name} job removed")
-                return
+                return None
             else:  # แอปรีสตาร์ตแล้วงานหายจากคิว: ส่งใหม่ ไม่นับเป็นความพยายาม
                 character.casting_job_id = None
                 self.store.save(series, f"casting {character.name} job lost, resubmit")
-                return
+                return None
 
         status = job["status"]
-        error = job.get("error")
         if status == "DONE":
             video = job.get("video_path") or self.gateway.find_output_video(job_id)
             if not video:  # งานบอกเสร็จแต่ไม่มีไฟล์วิดีโอ: นับเหมือนล้มเหลว
-                status, error = "FAILED", "งานเสร็จแล้วแต่ไม่มีไฟล์วิดีโอ (job finished without a video file)"
-            else:
-                dest = f"series/{series.id}/refs/{character_stem(series, character)}_cast.jpg"
-                # ffmpeg บางรุ่นดึงเฟรมย้อนหลังไม่ได้ (offset 3): ถอยไปใช้เฟรมสุดท้ายตรง ๆ
-                if (self.gateway.extract_frame(video, dest, "last", 3)
-                        or self.gateway.extract_frame(video, dest, "last", 0)):
-                    self._finish_casting(series, character, dest)
-                    return
-                status, error = "FAILED", "ดึงเฟรมจากวิดีโอคัดตัวละครไม่ได้ (extract frame failed)"
-
+                self._casting_failed(series, character,
+                                     "งานเสร็จแล้วแต่ไม่มีไฟล์วิดีโอ (job finished without a video file)")
+                return None
+            dest = f"series/{series.id}/refs/{character_stem(series, character)}_cast.jpg"
+            return functools.partial(self._extract_cast, series.id, character.name, job_id, video, dest)
         if status == "FAILED":
-            character.casting_attempts += 1
-            character.casting_job_id = None
-            if character.casting_attempts < series.max_attempts:
-                self.store.save(series, f"casting {character.name} retry {character.casting_attempts}")
-            else:
-                self._pause(series, "error", f"คัดตัวละคร {character.name} ล้มเหลว: {error}",
-                            f"casting {character.name} FAILED: {error}")
+            self._casting_failed(series, character, job.get("error"))
         elif status == "CANCELLED":
             character.casting_job_id = None
             self._pause(series, "user", None, f"casting {character.name} cancelled")
+        return None
+
+    def _extract_cast(self, series_id: str, name: str, job_id: str, video: str, dest: str) -> None:
+        """นอก lock: ดึงเฟรมจากวิดีโอคัดตัวละคร แล้วกลับเข้า lock บันทึกผลถ้าตัวละครยังรอผลงานนี้อยู่"""
+        # ffmpeg บางรุ่นดึงเฟรมย้อนหลังไม่ได้ (offset 3): ถอยไปใช้เฟรมสุดท้ายตรง ๆ
+        ok = (self.gateway.extract_frame(video, dest, "last", 3)
+              or self.gateway.extract_frame(video, dest, "last", 0))
+        with self.store.lock:
+            series = self.store.get(series_id)
+            character = find_character(series, name)
+            if series.status != "RUNNING" or character is None or character.casting_job_id != job_id:
+                return  # ระหว่างดึงเฟรมมีคนพัก/ยกเลิก/คัดตัวใหม่: ทิ้งผลนี้
+            if ok:
+                self._finish_casting(series, character, dest)
+            else:
+                self._casting_failed(series, character,
+                                     "ดึงเฟรมจากวิดีโอคัดตัวละครไม่ได้ (extract frame failed)")
+
+    def _casting_failed(self, series: Series, character: Character, error: str | None) -> None:
+        character.casting_attempts += 1
+        character.casting_job_id = None
+        if character.casting_attempts < series.max_attempts:
+            self.store.save(series, f"casting {character.name} retry {character.casting_attempts}")
+        else:
+            self._pause(series, "error", f"คัดตัวละคร {character.name} ล้มเหลว: {error}",
+                        f"casting {character.name} FAILED: {error}")
 
     def _finish_casting(self, series: Series, character: Character, ref_path: str) -> None:
         character.reference_images = [RefImage(path=ref_path)]
@@ -187,16 +208,87 @@ class SeriesRunner:
         self._pause(series, "casting", f"คัดตัวละครเสร็จแล้ว กรุณาตรวจรูป: {', '.join(names)}", event)
 
     # ---------- ส่งงาน ----------
-    def _submit(self, series: Series, episode: Episode, scene: Scene) -> None:
-        reference_names: list[str] | None = None
-        first_frame_name: str | None = None
-        if scene.mode == "ref":
-            reference_names = self._reference_names(series, scene)
-        elif scene.mode == "chain":
-            first_frame_name = self._first_frame_name(series, episode, scene)
-            if first_frame_name is None:
-                return  # หยุดซีรีส์ไปแล้ว (ดึงเฟรมจากฉากก่อนหน้าไม่ได้)
+    def _prepare_submit(self, series: Series, episode: Episode, scene: Scene) -> Callable[[], None] | None:
+        """ฉาก text ส่งได้ทันที; ref/chain ต้องอัปโหลดรูปหรือดึงเฟรมก่อน จึงคืนงานให้ทำนอก lock
 
+        ข้อมูลที่งานนอก lock ใช้ถูกคัดลอกออกมาเป็นค่าธรรมดา (path, ชื่อใน ComfyUI, base URL)
+        """
+        key = self._submit_key(series, episode, scene)
+        if scene.mode == "ref":
+            images = [(i.path, i.comfy_name, i.comfy_base_url) for i in self._scene_images(series, scene)]
+            return functools.partial(self._submit_ref, series.id, key, images, self.gateway.comfy_base_url())
+        if scene.mode == "chain":
+            previous_episode, previous = self._previous(series, scene)
+            frame = previous.last_frame_path
+            extract = not frame or not self.gateway.output_exists(frame)
+            if extract:
+                frame = f"frames/{previous.job_id}_last.jpg"
+            return functools.partial(self._submit_chain, series.id, key, previous.video_path, frame,
+                                     extract, self._label(previous_episode, previous))
+        self._submit(series, episode, scene)
+        return None
+
+    def _submit_key(self, series: Series, episode: Episode, scene: Scene) -> tuple:
+        """สิ่งที่การเตรียมส่งฉากขึ้นอยู่ด้วย — ถ้าเปลี่ยนระหว่างทำ I/O นอก lock ผลที่เตรียมไว้ใช้ไม่ได้"""
+        if scene.mode == "ref":
+            inputs: tuple = tuple(i.path for i in self._scene_images(series, scene))
+        elif scene.mode == "chain":
+            _, previous = self._previous(series, scene)
+            inputs = (previous.job_id, previous.video_path)
+        else:
+            inputs = ()
+        return episode.number, scene.index, scene.mode, inputs
+
+    def _still_next(self, series_id: str, key: tuple) -> tuple[Series, Episode, Scene] | None:
+        """ใต้ lock: คืน (series, episode, scene) ตัวจริงถ้าฉากที่เตรียมไว้ยังเป็นงานถัดไปแบบเดิม ไม่งั้น None"""
+        series = self.store.get(series_id)
+        if series.status != "RUNNING" or any(c.casting_job_id or needs_casting(c) for c in series.characters):
+            return None
+        episode, scene = self._current(series)
+        if scene is None or scene.job_id is not None or self._submit_key(series, episode, scene) != key:
+            return None
+        return series, episode, scene
+
+    def _submit_ref(self, series_id: str, key: tuple, images: list[tuple[str, str | None, str | None]],
+                    base_url: str) -> None:
+        """นอก lock: อัปโหลดรูปอ้างอิงที่ ComfyUI ยังไม่มี (โหมด RunPod = HTTP ช้า) แล้วกลับเข้า lock ส่งงาน"""
+        names: list[str] = []
+        pushed: dict[str, str] = {}
+        for path, name, url in images:
+            if path in pushed:
+                name = pushed[path]
+            elif name is None or url != base_url or self.gateway.comfy_input_exists(name) is False:
+                name = pushed[path] = self.gateway.push_image(path)
+            names.append(name)
+        with self.store.lock:
+            found = self._still_next(series_id, key)
+            if found is None:
+                return  # ระหว่างอัปโหลดมีคนพัก/แก้ฉาก: ทิ้งผลนี้ รอบหน้าค่อยเตรียมใหม่
+            series, episode, scene = found
+            for image, name in zip(self._scene_images(series, scene), names):
+                image.comfy_name, image.comfy_base_url = name, base_url
+            self._submit(series, episode, scene, reference_names=names)
+
+    def _submit_chain(self, series_id: str, key: tuple, video: str | None, frame: str, extract: bool,
+                      previous_label: str) -> None:
+        """นอก lock: ดึงเฟรมสุดท้ายของฉากก่อนหน้า (ถ้ายังไม่มีไฟล์) แล้วอัปโหลดเป็นเฟรมแรก จากนั้นกลับเข้า lock ส่งงาน"""
+        extracted = not extract or self.gateway.extract_frame(video, frame, "last", 0)
+        name = self.gateway.push_image(frame) if extracted else None
+        with self.store.lock:
+            found = self._still_next(series_id, key)
+            if found is None:
+                return
+            series, episode, scene = found
+            if name is None:
+                self._pause(series, "error", f"ดึงเฟรมสุดท้ายของ {previous_label} ไม่ได้",
+                            f"{self._label(episode, scene)} FAILED: extract frame")
+                return
+            if extract:
+                self._previous(series, scene)[1].last_frame_path = frame
+            self._submit(series, episode, scene, first_frame_name=name)
+
+    def _submit(self, series: Series, episode: Episode, scene: Scene,
+                reference_names: list[str] | None = None, first_frame_name: str | None = None) -> None:
         episode.status = "RUNNING"
         scene.job_id = self.gateway.submit_job(
             prompt=scene.prompt, job_type=job_type_for(scene.mode, series.low_vram),
@@ -209,37 +301,21 @@ class SeriesRunner:
         scene.started_at = self.clock()
         self.store.save(series, f"{self._label(episode, scene)} QUEUED")
 
-    def _reference_names(self, series: Series, scene: Scene) -> list[str]:
-        base_url = self.gateway.comfy_base_url()
-        names: list[str] = []
-        for char_name in scene.characters:
-            character = find_character(series, char_name)
-            for image in character.reference_images if character else []:
-                reusable = (
-                    image.comfy_name is not None
-                    and image.comfy_base_url == base_url
-                    and self.gateway.comfy_input_exists(image.comfy_name) is not False
-                )
-                if not reusable:
-                    image.comfy_name = self.gateway.push_image(image.path)
-                    image.comfy_base_url = base_url
-                names.append(image.comfy_name)
-        return names
+    @staticmethod
+    def _scene_images(series: Series, scene: Scene) -> list[RefImage]:
+        """รูปอ้างอิงทั้งหมดของตัวละครในฉาก ตามลำดับที่ส่งให้ ComfyUI"""
+        images: list[RefImage] = []
+        for name in scene.characters:
+            character = find_character(series, name)
+            images.extend(character.reference_images if character else [])
+        return images
 
-    def _first_frame_name(self, series: Series, episode: Episode, scene: Scene) -> str | None:
+    @staticmethod
+    def _previous(series: Series, scene: Scene) -> tuple[Episode, Scene]:
+        """ฉากก่อนหน้าในลำดับทั้งเรื่อง (ข้ามตอนได้)"""
         flat = [(e, s) for e in series.episodes for s in e.scenes]
         position = next(i for i, (_, s) in enumerate(flat) if s is scene)
-        previous = flat[position - 1][1]
-        frame = previous.last_frame_path
-        if not frame or not self.gateway.output_exists(frame):
-            frame = f"frames/{previous.job_id}_last.jpg"
-            if not self.gateway.extract_frame(previous.video_path, frame, "last", 0):
-                self._pause(series, "error",
-                            f"ดึงเฟรมสุดท้ายของ {self._label(*flat[position - 1])} ไม่ได้",
-                            f"{self._label(episode, scene)} FAILED: extract frame")
-                return None
-            previous.last_frame_path = frame
-        return self.gateway.push_image(frame)
+        return flat[position - 1]
 
     # ---------- ตามผลงาน ----------
     def _poll(self, series: Series, episode: Episode, scene: Scene) -> None:
@@ -295,7 +371,7 @@ class SeriesRunner:
             self._pause(series, "user", None, f"{label} cancelled")
 
     # ---------- รวมตอน ----------
-    def _prepare_merge(self, series: Series, episode: Episode):
+    def _prepare_merge(self, series: Series, episode: Episode) -> Callable[[], None] | None:
         """ทุกฉาก DONE: ไฟล์หาย → รีเซ็ตฉากนั้น; ฉากเดียว → จบตอนเลย; หลายฉาก → คืนงานให้ concat นอก lock"""
         for scene in episode.scenes:
             if not scene.video_path or not self.gateway.output_exists(scene.video_path):
@@ -309,7 +385,7 @@ class SeriesRunner:
                                  job.get("duration") if job else None)
             return None
         paths = [s.video_path for s in episode.scenes]
-        return episode.number, paths
+        return functools.partial(self._merge, series.id, episode.number, paths)
 
     def _merge(self, series_id: str, episode_number: int, paths: list[str]) -> None:
         stem = f"series_{series_id}_ep{episode_number:02d}_{secrets.token_hex(3)}"
