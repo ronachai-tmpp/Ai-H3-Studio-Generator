@@ -54,3 +54,36 @@ def test_thai_print_survives_non_utf8_stdout():
 
     assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")[-800:]
     assert "ดึง last frame สำเร็จ" in proc.stdout.decode("utf-8")
+
+
+def test_wait_for_history_survives_transient_http_timeout(monkeypatch):
+    """ComfyUI ตอบ /history ช้าเกิน timeout ครั้งเดียวระหว่างเรนเดอร์หนัก (0.75 MP)
+    ต้องไม่ทำให้งานที่ ComfyUI ทำเสร็จจริงกลายเป็น FAILED"""
+    from app.services import comfyui_client
+
+    done = {"p1": {"status": {"status_str": "success"}, "outputs": {"172": {}}}}
+    replies = iter([TimeoutError("timed out"), {}, done])
+
+    def fake_get_history(prompt_id):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(comfyui_client, "get_history", fake_get_history)
+    monkeypatch.setattr(comfyui_client.time, "sleep", lambda _s: None)
+
+    assert comfyui_client.wait_for_history("p1", timeout=60.0) == done["p1"]
+
+
+def test_wait_for_history_gives_up_when_timeouts_last_past_deadline(monkeypatch):
+    from app.services import comfyui_client
+
+    def always_timeout(prompt_id):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(comfyui_client, "get_history", always_timeout)
+    monkeypatch.setattr(comfyui_client.time, "sleep", lambda _s: None)
+
+    with pytest.raises(comfyui_client.ComfyUIError):
+        comfyui_client.wait_for_history("p1", timeout=0.05)

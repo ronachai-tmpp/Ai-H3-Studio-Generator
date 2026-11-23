@@ -148,7 +148,14 @@ def wait_for_history(prompt_id: str, timeout: float = 1800.0) -> dict[str, Any]:
     last_history: dict[str, Any] = {}
 
     while time.monotonic() < deadline:
-        history = get_history(prompt_id)
+        try:
+            history = get_history(prompt_id)
+        except OSError as exc:
+            # ComfyUI ตอบช้าชั่วคราวระหว่างเรนเดอร์หนัก (socket timeout / connection reset)
+            # งานยังรันอยู่ฝั่ง ComfyUI: รอแล้วถามใหม่จนกว่าจะถึง deadline
+            print(f"[comfyui_client] history poll ช้า/หลุดชั่วคราว prompt_id={prompt_id}: {exc}")
+            time.sleep(2.0)
+            continue
         last_history = history
         entry = history.get(prompt_id)
 
